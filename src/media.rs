@@ -135,6 +135,8 @@ struct Watcher {
     sessions: (usize, usize),
     /// Última carátula, para no decodificarla de nuevo en cada play/pausa.
     cover: Option<Cover>,
+    /// Canción (título y artista) cuya carátula no se pudo leer, y cuántas veces se intentó.
+    cover_retry: Option<(String, u32)>,
     /// Íconos ya buscados, por id de app (también los que no se encontraron).
     icons: HashMap<String, IconEntry>,
     /// HWND guardado como número porque `HWND` no es `Send`.
@@ -155,6 +157,13 @@ const ICON_RETRY: Duration = Duration::from_secs(5);
 /// Las búsquedas de íconos van de a una: al aparecer una app llegan varios eventos a la vez y
 /// sin esto cada uno buscaría el mismo ícono en paralelo.
 static ICON_LOADING: Mutex<()> = Mutex::new(());
+
+/// Reintentos de carátula para una misma canción: a los 0,5 s, 1 s y 2 s.
+const COVER_ATTEMPTS: u32 = 3;
+const COVER_RETRY: Duration = Duration::from_millis(500);
+
+/// `publish` corre de a uno (ver allí).
+static PUBLISHING: Mutex<()> = Mutex::new(());
 
 static WATCHER: Mutex<Option<Watcher>> = Mutex::new(None);
 
@@ -194,6 +203,7 @@ fn init(hwnd: isize) -> Result<()> {
         selected: None,
         sessions: (0, 0),
         cover: None,
+        cover_retry: None,
         icons: HashMap::new(),
         hwnd,
     });
@@ -349,6 +359,10 @@ pub fn seek(fraction: f32) {
 /// Lee el estado de la sesión actual y lo manda a la ventana.
 /// `refresh_cover` = volver a decodificar la carátula (cambió la canción o la sesión).
 fn publish(refresh_cover: bool) {
+    // De a uno: al cambiar de canción llegan varios eventos a la vez. Sin esto, uno que no
+    // decodifica la carátula podía leer la guardada (vieja o ninguna) mientras otro decodificaba
+    // la nueva, terminar después y dejar la isla con el cuadro gris.
+    let _publishing = PUBLISHING.lock().unwrap_or_else(|e| e.into_inner());
     let (session, hwnd, cached, sessions, id) = {
         let guard = lock();
         let Some(w) = guard.as_ref() else { return };
@@ -361,10 +375,33 @@ fn publish(refresh_cover: bool) {
         )
     };
     let mut info = session.and_then(|s| read(&s, refresh_cover, cached).ok());
+    let mut retry = None;
     if refresh_cover || info.is_none() {
         if let Some(w) = lock().as_mut() {
             w.cover = info.as_ref().and_then(|i| i.cover.clone());
+            // Canción sin carátula: puede que la app aún no la tenga lista (pasa con Spotify
+            // al cambiar de canción o después de un anuncio). Se reintenta unas veces.
+            w.cover_retry = match info.as_ref().filter(|i| i.cover.is_none()) {
+                Some(i) => {
+                    let song = format!("{}\u{1}{}", i.title, i.artist);
+                    let attempts = match w.cover_retry.take() {
+                        Some((same, n)) if same == song => n + 1,
+                        _ => 1,
+                    };
+                    if attempts <= COVER_ATTEMPTS {
+                        retry = Some(COVER_RETRY * 2u32.pow(attempts - 1));
+                    }
+                    Some((song, attempts))
+                }
+                None => None,
+            };
         }
+    }
+    if let Some(wait) = retry {
+        std::thread::spawn(move || {
+            std::thread::sleep(wait);
+            publish(true);
+        });
     }
     if let Some(info) = info.as_mut() {
         info.sessions = sessions;
