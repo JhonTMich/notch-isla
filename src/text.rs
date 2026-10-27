@@ -102,6 +102,21 @@ impl TextRenderer {
         }
     }
 
+    /// Ancho (píxeles físicos) de la más larga de las dos líneas, como las dibujaría `draw`.
+    /// Las maqueta y las guarda: `draw` las reutiliza sin volver a maquetar.
+    pub fn measure(&mut self, title: &str, subtitle: &str) -> f32 {
+        let t = line_for(&self.dwrite, &self.title, &mut self.title_line, title)
+            .map_or(0.0, |l| l.width);
+        let s = line_for(
+            &self.dwrite,
+            &self.subtitle,
+            &mut self.subtitle_line,
+            subtitle,
+        )
+        .map_or(0.0, |l| l.width);
+        t.max(s)
+    }
+
     /// Dibuja título y subtítulo encima de lo que ya hay en el DIB seleccionado en `dc`.
     /// `t` = segundos desde que empezó el desplazamiento. Devuelve `true` si alguna línea
     /// no cabe y por tanto se está desplazando (hay que seguir redibujando).

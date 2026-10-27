@@ -39,6 +39,7 @@ const CMD_LYRICS: usize = 7;
 const CMD_HOTKEY_CHANGE: usize = 8;
 const CMD_HOTKEY_DEFAULT: usize = 9;
 const CMD_HOTKEY_OFF: usize = 10;
+const CMD_REAL_BARS: usize = 11;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -64,6 +65,7 @@ pub enum Command {
     ToggleNotices,
     ToggleFullscreen,
     ToggleLyrics,
+    ToggleRealBars,
     /// Escuchar la próxima combinación de teclas como atajo nuevo.
     ChangeHotkey,
     /// Atajo elegido: el de siempre, o `None` para desactivarlo.
@@ -235,6 +237,11 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
     // La letra se pide a internet: se dice a quién, para que cada uno decida activarla.
     items.push(Item::Label("Se busca en lrclib.net".to_string()));
     items.push(action(
+        CMD_REAL_BARS,
+        "Barras con el sonido real",
+        settings.real_bars,
+    ));
+    items.push(action(
         CMD_NOTICES,
         "Avisar al cambiar la salida de audio",
         settings.notices,
@@ -279,6 +286,7 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
         CMD_FULLSCREEN => Some(Command::ToggleFullscreen),
         CMD_CANCEL_TIMER => Some(Command::CancelTimer),
         CMD_LYRICS => Some(Command::ToggleLyrics),
+        CMD_REAL_BARS => Some(Command::ToggleRealBars),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),

@@ -19,6 +19,7 @@ mod system;
 mod text;
 mod tray;
 mod update;
+mod visualizer;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -34,6 +35,7 @@ use system::AudioWatch;
 use text::TextRenderer;
 use tiny_skia::Pixmap;
 use tray::Tray;
+use visualizer::Visualizer;
 use windows::core::{w, Result};
 use windows::Win32::Foundation::{
     GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
@@ -298,6 +300,8 @@ struct App {
     /// Proyector de la letra bajo la isla. Se crea la primera vez que hay un verso que mostrar
     /// (con la letra apagada no ocupa memoria); si no se pudiera crear, la isla sigue igual.
     projector: Option<Projector>,
+    /// Escucha el audio de la app que suena para las barras reales.
+    visualizer: Visualizer,
 }
 
 /// Aviso del sistema con sus textos.
@@ -350,6 +354,7 @@ impl App {
             lyrics: HashMap::new(),
             lyrics_pending: HashSet::new(),
             projector: None,
+            visualizer: Visualizer::default(),
         })
     }
 
@@ -1023,7 +1028,18 @@ impl App {
             self.last_notice = None;
         }
         let notice = self.notice.as_ref().or(self.last_notice.as_ref());
+        let playing = self.visible && self.media.as_ref().is_some_and(|m| m.playing);
+        let bars = playing && island::mini_alpha(self.spring.value) > 0.0;
+        // Se escucha el audio de la app solo mientras se ven las barras.
+        let listen = self
+            .media
+            .as_ref()
+            .filter(|_| bars && self.settings.real_bars)
+            .map(|m| m.app_id.as_str());
+        self.visualizer.set_target(listen);
+        let levels = self.visualizer.levels();
         let controls = media.map(|m| Controls {
+            levels,
             pressed,
             playing: m.playing,
             hovered: self.hovered_button,
@@ -1036,21 +1052,24 @@ impl App {
             update: self.update.is_some(),
             update_hovered: self.update_hovered,
         });
-        let playing = self.visible && self.media.as_ref().is_some_and(|m| m.playing);
-        let bars = playing && island::mini_alpha(self.spring.value) > 0.0;
         // El contenido expandido (y con él la barra) se ve a partir de ~55 % de la expansión.
         // Mientras se muestra el volumen también hace falta redibujar: para quitarlo a tiempo.
         let progress = (playing
             && self.spring.value > 0.55
             && self.media.as_ref().is_some_and(|m| m.timeline.is_some()))
             || volume.is_some();
+        // Ancho del texto del aviso, para centrar ícono y texto en la isla.
+        let notice_text_w = match (notice, self.text.as_mut()) {
+            (Some(n), Some(text)) => text.measure(&n.title, &n.subtitle),
+            _ => 0.0,
+        };
         let area = island::draw(
             &mut self.surface.pixmap,
             self.scale,
             self.spring.value,
             self.presence.value,
             controls,
-            notice.map(|n| &n.view),
+            notice.map(|n| (&n.view, notice_text_w)),
             cover.map(|c| c.image.as_ref()),
             media
                 .and_then(|m| m.app_icon.as_ref())
@@ -1602,6 +1621,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             Command::Monitor(i) => settings.monitor = monitors[i].device.clone(),
                             Command::ToggleNotices => settings.notices = !settings.notices,
                             Command::ToggleLyrics => settings.lyrics = !settings.lyrics,
+                            Command::ToggleRealBars => settings.real_bars = !settings.real_bars,
                             Command::SetHotkey(h) => settings.hotkey = h,
                             Command::ToggleFullscreen => {
                                 settings.hide_fullscreen = !settings.hide_fullscreen

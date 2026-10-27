@@ -50,7 +50,7 @@ cargo run --example icon
 
 - La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
 - Si no la usas, a los 3 s (se cambia en la bandeja) sube y se oculta para no tapar lo que hay debajo (pestañas del navegador, etc.). Queda una línea fina en el borde superior, con el avance de la canción en el color de la carátula; lleva el mouse a esa línea para traer la isla de vuelta. **Ctrl + Alt + N** la oculta o la trae en cualquier momento; el atajo se cambia o se desactiva en la bandeja (**Cambiar atajo...** espera la combinación que presiones: Ctrl, Alt o Win más una tecla).
-- Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que se mueven mientras suena la música.
+- Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que siguen el sonido real de la app que suena: graves, medios y agudos. Se puede volver a la animación simple con **Barras con el sonido real** en la bandeja.
 - Pasa el mouse sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente.
 - En la esquina de la carátula, el ícono de la app que suena (Spotify, Chrome...). Si hay varias apps con música, unos puntos bajo la carátula lo indican y un clic en ella pasa a la siguiente.
 - Debajo, una barra de progreso con el color de la carátula; haz clic en ella para saltar a ese punto de la canción (si la app informa el tiempo).
@@ -96,6 +96,7 @@ src/
 ├─ audio.rs       volumen de la app que suena o general, con Core Audio (rueda del mouse)
 ├─ routing.rs     salida de audio por app (interfaz interna de Windows, con respaldo si falta)
 ├─ autostart.rs   iniciar con Windows (clave Run del usuario)
+├─ visualizer.rs  barras reales: captura del audio de la app (WASAPI loopback) y FFT
 ├─ lyrics.rs      letra sincronizada de LRCLIB (formato LRC)
 ├─ projector.rs   proyector de la letra bajo la isla (ventana que no recibe clics)
 ├─ update.rs      actualizaciones: último release en GitHub, descarga e instalación (WinHTTP)

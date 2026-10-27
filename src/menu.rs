@@ -520,8 +520,9 @@ fn render(st: &mut State) {
         anti_alias: true,
         ..Default::default()
     };
-    // Cuerpo negro como la isla, con un borde tenue para separarlo de fondos oscuros.
-    paint.set_color_rgba8(0, 0, 0, 245);
+    // Cuerpo gris oscuro (más claro que la isla, para que se lea mejor), con un borde tenue
+    // para separarlo de fondos oscuros.
+    paint.set_color_rgba8(44, 44, 48, 250);
     fill_rounded_rect(pixmap, &paint, 0.0, 0.0, w, h, RADIUS * s);
     paint.set_color_rgba8(255, 255, 255, 34);
     if let Some(border) = rounded_rect_path(0.5, 0.5, w - 1.0, h - 1.0, RADIUS * s - 0.5) {

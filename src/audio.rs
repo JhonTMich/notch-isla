@@ -146,6 +146,38 @@ pub fn app_pids(app_id: &str) -> Vec<u32> {
     pids
 }
 
+/// Proceso principal de la app `app_id`: el que no fue abierto por otro proceso de la misma
+/// app (Chrome y Spotify abren muchos, y el audio sale de uno de sus hijos).
+pub fn app_root_pid(app_id: &str) -> Option<u32> {
+    let wanted = process_name(app_id)?;
+    let mut found: Vec<(u32, u32)> = Vec::new();
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut ok = Process32FirstW(snapshot, &mut entry).is_ok();
+        while ok {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
+            if name.strip_suffix(".exe").unwrap_or(&name) == wanted {
+                found.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            }
+            ok = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    found
+        .iter()
+        .find(|(_, parent)| !found.iter().any(|(pid, _)| pid == parent))
+        .map(|(pid, _)| *pid)
+}
+
 /// Nombre corto de la app para mostrar ("Spotify", "Chrome", "Edge").
 pub fn app_label(app_id: &str) -> String {
     match process_name(app_id).as_deref() {

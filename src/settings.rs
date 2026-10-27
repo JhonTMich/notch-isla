@@ -27,6 +27,8 @@ pub struct Settings {
     pub notices: bool,
     /// Muestra la letra sincronizada (la pide a lrclib.net); apagada si no se activa.
     pub lyrics: bool,
+    /// Las barras de la isla siguen el sonido real de la app (si no, una animación).
+    pub real_bars: bool,
     /// Atajo para mostrar u ocultar la isla; `None` = desactivado.
     pub hotkey: Option<Hotkey>,
 }
@@ -48,6 +50,7 @@ impl Settings {
             hide_fullscreen: read_dword(w!("HideFullscreen")).is_none_or(|v| v != 0),
             notices: read_dword(w!("Notices")).is_none_or(|v| v != 0),
             lyrics: read_dword(w!("Lyrics")).is_some_and(|v| v != 0),
+            real_bars: read_dword(w!("RealBars")).is_none_or(|v| v != 0),
             hotkey,
         }
     }
@@ -58,6 +61,7 @@ impl Settings {
         write_dword(w!("HideFullscreen"), self.hide_fullscreen as u32);
         write_dword(w!("Notices"), self.notices as u32);
         write_dword(w!("Lyrics"), self.lyrics as u32);
+        write_dword(w!("RealBars"), self.real_bars as u32);
         write_dword(w!("HotkeyMods"), self.hotkey.map_or(0, |h| h.mods));
         write_dword(w!("HotkeyKey"), self.hotkey.map_or(0, |h| h.vk));
     }

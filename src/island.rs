@@ -159,6 +159,9 @@ pub struct Controls {
     pub update: bool,
     /// El mouse está sobre el punto de actualización (se agranda un poco).
     pub update_hovered: bool,
+    /// Nivel real de cada barra (0 a 1, de graves a agudos) si se está escuchando el audio;
+    /// `None` = la animación de siempre.
+    pub levels: Option<[f32; 4]>,
 }
 
 /// Ícono de un aviso del sistema.
@@ -362,7 +365,8 @@ pub fn draw(
     p: f32,
     presence: f32,
     controls: Option<Controls>,
-    notice: Option<&Notice>,
+    // Aviso y ancho de su texto más largo (para centrarlo).
+    notice: Option<(&Notice, f32)>,
     cover: Option<&Pixmap>,
     app_icon: Option<&Pixmap>,
     t: f32,
@@ -421,7 +425,7 @@ pub fn draw(
 
     // Un aviso reemplaza a la música mientras dura.
     if let Some(n) = notice {
-        return Some(draw_notice(pixmap, &g, n));
+        return Some(draw_notice(pixmap, &g, n.0, n.1));
     }
 
     let (cover_x, cover_y, size) = g.cover_rect();
@@ -481,9 +485,18 @@ pub fn draw(
 }
 
 /// Aviso: ícono en un recuadro teñido donde va la carátula. Devuelve el espacio para los textos, que llega hasta el borde derecho (no hay botones).
-fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice) -> TextArea {
+/// `text_w`: ancho del texto más largo (píxeles físicos), para centrar ícono y texto juntos
+/// en la isla; en vertical van al centro (los avisos no tienen barra de progreso debajo).
+fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice, text_w: f32) -> TextArea {
     let s = g.scale;
-    let (x, y, size) = g.cover_rect();
+    let size = COVER.1 * s;
+    let gap = 10.0 * s;
+    let margin = COVER.0 * s;
+    // Lo que cabe del texto entre los márgenes; si no cabe entero, se desplaza (marquee).
+    let room = (g.w - 2.0 * margin - size - gap).max(0.0);
+    let text_w = text_w.min(room);
+    let x = g.x0 + (g.w - (size + gap + text_w)) / 2.0;
+    let y = g.cy() - size / 2.0;
     let [r, gr, b] = n.color;
     let mut paint = Paint {
         anti_alias: true,
@@ -493,11 +506,12 @@ fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice) -> TextArea {
     fill_rounded_rect(pixmap, &paint, x, y, size, size, COVER.2 * s);
     paint.set_color_rgba8(r, gr, b, (g.alpha * 255.0) as u8);
     draw_notice_icon(pixmap, &paint, n.icon, x + size / 2.0, y + size / 2.0, s);
-    let text_x = x + size + 10.0 * s;
     TextArea {
-        x: text_x,
-        w: (g.x1() - 16.0 * s - text_x).max(0.0),
-        cy: g.row_cy(),
+        x: x + size + gap,
+        // Un píxel de más: el ancho medido tiene decimales y el recorte no debe comerse la
+        // última letra.
+        w: text_w + 1.0,
+        cy: g.cy(),
         alpha: g.alpha,
     }
 }
@@ -733,7 +747,9 @@ fn draw_bars(pixmap: &mut Pixmap, g: &Geometry, s: f32, c: &Controls, t: f32, al
     paint.set_color_rgba8(r, gr, b, (alpha * 255.0) as u8);
 
     for (i, &(w1, w2)) in BAR_SPEEDS.iter().enumerate() {
-        let level = if c.playing {
+        let level = if let (true, Some(levels)) = (c.playing, c.levels) {
+            levels[i].clamp(0.0, 1.0)
+        } else if c.playing {
             let k = i as f32;
             (0.5 + 0.3 * (t * w1 + k).sin() + 0.2 * (t * w2 + 2.0 * k).sin()).clamp(0.0, 1.0)
         } else {
