@@ -57,7 +57,7 @@ cargo run --example icon
 - Gira la rueda del mouse sobre la isla para subir o bajar el volumen de Windows; la barra muestra el nivel un momento.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
 - Clic derecho en el ícono de la bandeja: **Iniciar con Windows** y **Salir**.
-- Al minuto de abrirse y luego una vez al día, consulta en GitHub si hay una versión nueva. Si la hay, muestra un aviso (clic para ir a la descarga) y agrega **Descargar la versión X** al menú de la bandeja. Ver [PRIVACY.md](PRIVACY.md).
+- Al minuto de abrirse y luego una vez al día, consulta en GitHub si hay una versión nueva. Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).
 
 ## Cómo está hecha
 
@@ -81,7 +81,7 @@ src/
 ├─ tray.rs        ícono en la bandeja y su menú
 ├─ audio.rs       volumen general con Core Audio (rueda del mouse)
 ├─ autostart.rs   iniciar con Windows (clave Run del usuario)
-├─ update.rs      aviso de actualizaciones (último release en GitHub, con WinHTTP)
+├─ update.rs      actualizaciones: último release en GitHub, descarga e instalación (WinHTTP)
 └─ fullscreen.rs  ocultar la isla cuando una app está a pantalla completa
 ```
 

@@ -210,7 +210,7 @@ struct App {
     /// Hasta cuándo se muestra el nivel de volumen en la isla.
     volume_until: Option<Instant>,
     /// Versión nueva publicada en GitHub, si la hay (se ofrece en el menú de la bandeja).
-    update: Option<String>,
+    update: Option<update::Update>,
     /// Se ocultó sola por no usarse; vuelve al tocar el borde superior con el mouse.
     idle_hidden: bool,
     /// Botón recién pulsado y cuándo, para su animación.
@@ -792,6 +792,16 @@ impl Drop for Surface {
     }
 }
 
+/// Instala la versión nueva (y cierra la isla: el instalador la vuelve a abrir) o abre la
+/// página de descarga.
+fn apply_update(hwnd: HWND, update: Option<&update::Update>) {
+    if update.is_some_and(update::Update::apply) {
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+}
+
 /// Coordenadas del mouse en la ventana (con signo, como GET_X_LPARAM / GET_Y_LPARAM).
 fn mouse_pos(lparam: LPARAM) -> (f32, f32) {
     let x = (lparam.0 & 0xFFFF) as u16 as i16;
@@ -857,30 +867,39 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         update::WM_UPDATE => {
-            let version = unsafe { update::take(lparam) };
+            let found = unsafe { update::take(lparam) };
             with_app(|app| {
-                app.tray.notify(
-                    &format!("Notch Isla {version} disponible"),
-                    "Haz clic aquí para descargarla, o búscala en el menú del ícono.",
-                );
-                app.update = Some(version);
+                let version = &found.version;
+                if found.installer.is_some() {
+                    app.tray.notify(
+                        &format!("Notch Isla {version} lista para instalar"),
+                        "Haz clic aquí para actualizar. La isla se cierra y vuelve en unos segundos.",
+                    );
+                } else {
+                    app.tray.notify(
+                        &format!("Notch Isla {version} disponible"),
+                        "Haz clic aquí para descargarla, o búscala en el menú del ícono.",
+                    );
+                }
+                app.update = Some(found);
             });
             LRESULT(0)
         }
         // Clic derecho sobre el ícono de la bandeja: menú. El evento real va en la parte baja de lparam.
         tray::WM_TRAY => {
             let event = (lparam.0 & 0xFFFF) as u32;
+            // Se copia antes de actuar: mientras el menú está abierto no debe haber préstamo de la app.
+            let mut pending = None;
+            with_app(|app| pending = app.update.clone());
             if event == NIN_BALLOONUSERCLICK {
-                update::open_download_page();
+                apply_update(hwnd, pending.as_ref());
             } else if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
-                // Se copia antes de abrir el menú: mientras está abierto no debe haber préstamo de la app.
-                let mut pending = None;
-                with_app(|app| pending = app.update.clone());
-                match tray::show_menu(hwnd, pending.as_deref()) {
+                let label = pending.as_ref().map(update::Update::menu_label);
+                match tray::show_menu(hwnd, label.as_deref()) {
                     Some(tray::Command::ToggleAutostart) => {
                         autostart::set(!autostart::is_enabled())
                     }
-                    Some(tray::Command::Download) => update::open_download_page(),
+                    Some(tray::Command::Update) => apply_update(hwnd, pending.as_ref()),
                     Some(tray::Command::Exit) => unsafe {
                         let _ = DestroyWindow(hwnd);
                     },

@@ -75,6 +75,9 @@ Root: HKCU; Subkey: "{#RunKey}"; ValueType: string; ValueName: "{#RunValue}"; Va
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchApp}"; Flags: nowait postinstall skipifsilent
+; Actualización desde la app (instalación silenciosa): la isla se cerró para dejar instalar y
+; se vuelve a abrir sola.
+Filename: "{app}\{#AppExe}"; Flags: nowait; Check: WizardSilent
 
 [UninstallRun]
 ; La isla no tiene ventana que cerrar: se termina el proceso antes de borrar el .exe.

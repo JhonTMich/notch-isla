@@ -32,7 +32,7 @@ const CMD_UPDATE: usize = 3;
 
 pub enum Command {
     ToggleAutostart,
-    Download,
+    Update,
     Exit,
 }
 
@@ -123,13 +123,12 @@ impl Drop for Tray {
 ///
 /// No recibe `&Tray` a propósito: el menú corre su propio bucle de mensajes y la ventana
 /// sigue recibiendo mensajes mientras está abierto (no debe haber un préstamo de la app activo).
-/// `update`: versión nueva disponible, si la hay; agrega arriba la opción para descargarla.
+/// `update`: texto de la opción de actualizar, si hay una versión nueva; va arriba de todo.
 pub fn show_menu(hwnd: HWND, update: Option<&str>) -> Option<Command> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
-        if let Some(version) = update {
-            let label = HSTRING::from(format!("Descargar la versión {version}"));
-            let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, &label);
+        if let Some(label) = update {
+            let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, &HSTRING::from(label));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         }
         let autostart_flags = if autostart::is_enabled() {
@@ -164,7 +163,7 @@ pub fn show_menu(hwnd: HWND, update: Option<&str>) -> Option<Command> {
 
         match cmd.0 as usize {
             CMD_AUTOSTART => Some(Command::ToggleAutostart),
-            CMD_UPDATE => Some(Command::Download),
+            CMD_UPDATE => Some(Command::Update),
             CMD_EXIT => Some(Command::Exit),
             _ => None,
         }
