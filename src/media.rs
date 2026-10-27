@@ -4,10 +4,11 @@
 //! así que cada cambio se envía a la ventana con `PostMessageW(WM_MEDIA)`.
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tiny_skia::{IntSize, Pixmap};
 use windows::core::{Error, Result};
-use windows::Foundation::TypedEventHandler;
+use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Imaging::{
     BitmapAlphaMode, BitmapBounds, BitmapDecoder, BitmapInterpolationMode, BitmapPixelFormat,
     BitmapTransform, ColorManagementMode, ExifOrientationMode,
@@ -35,7 +36,36 @@ pub struct NowPlaying {
     pub artist: String,
     pub playing: bool,
     pub cover: Option<Cover>,
+    /// Avance de la canción; `None` si la app no lo informa (pasa con algunos navegadores).
+    pub timeline: Option<Timeline>,
 }
+
+/// Posición de la canción en un instante. SMTC no avisa cada segundo: entre avisos la
+/// posición se calcula sumando el tiempo transcurrido mientras suena.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Timeline {
+    /// Segundos desde el inicio, medidos en `read_at`.
+    pub position: f32,
+    /// Duración total en segundos (siempre > 0).
+    pub duration: f32,
+    pub read_at: Instant,
+}
+
+impl Timeline {
+    /// Fracción reproducida (0 a 1) ahora mismo.
+    pub fn progress(&self, playing: bool) -> f32 {
+        let mut position = self.position;
+        if playing {
+            position += self.read_at.elapsed().as_secs_f32();
+        }
+        (position / self.duration).clamp(0.0, 1.0)
+    }
+}
+
+/// Unidades de los tiempos de WinRT: 100 ns.
+const TICKS_PER_SEC: f64 = 10_000_000.0;
+/// Diferencia entre la época de WinRT (1601) y la de Unix (1970), en ticks de 100 ns.
+const EPOCH_DIFF_TICKS: i64 = 116_444_736_000_000_000;
 
 /// Carátula cuadrada en RGBA premultiplicado (el formato de tiny-skia).
 /// Se compara por identidad: cada decodificación produce una carátula distinta.
@@ -76,7 +106,7 @@ fn accent_of(pixmap: &Pixmap) -> [u8; 3] {
 struct Watcher {
     manager: Manager,
     /// Sesión actual y los tokens de sus eventos (para desuscribirse al cambiar de sesión).
-    session: Option<(Session, i64, i64)>,
+    session: Option<(Session, [i64; 3])>,
     /// Última carátula, para no decodificarla de nuevo en cada play/pausa.
     cover: Option<Cover>,
     /// HWND guardado como número porque `HWND` no es `Send`.
@@ -121,9 +151,10 @@ fn on_session_changed() {
         let mut guard = lock();
         let Some(w) = guard.as_mut() else { return };
 
-        if let Some((old, props_token, playback_token)) = w.session.take() {
+        if let Some((old, [props_token, playback_token, timeline_token])) = w.session.take() {
             let _ = old.RemoveMediaPropertiesChanged(props_token);
             let _ = old.RemovePlaybackInfoChanged(playback_token);
+            let _ = old.RemoveTimelinePropertiesChanged(timeline_token);
         }
 
         // Sin sesión (nada suena) la llamada devuelve error y la sesión queda en None.
@@ -137,8 +168,14 @@ fn on_session_changed() {
                 publish(false);
                 Ok(())
             }));
-            if let (Ok(a), Ok(b)) = (props_token, playback_token) {
-                w.session = Some((session, a, b));
+            // Saltos de posición (o el avance que algunas apps informan cada pocos segundos).
+            let timeline_token =
+                session.TimelinePropertiesChanged(&TypedEventHandler::new(|_, _| {
+                    publish(false);
+                    Ok(())
+                }));
+            if let (Ok(a), Ok(b), Ok(c)) = (props_token, playback_token, timeline_token) {
+                w.session = Some((session, [a, b, c]));
             }
         }
     }
@@ -157,6 +194,22 @@ pub fn press(button: Button) {
             Button::PlayPause => s.TryTogglePlayPauseAsync(),
             Button::Next => s.TrySkipNextAsync(),
         };
+    }
+}
+
+/// Salta a una fracción (0 a 1) de la canción. Como `press`, no espera la respuesta.
+pub fn seek(fraction: f32) {
+    let session = lock()
+        .as_ref()
+        .and_then(|w| w.session.as_ref().map(|s| s.0.clone()));
+    let Some(s) = session else { return };
+    let Ok(tl) = s.GetTimelineProperties() else {
+        return;
+    };
+    if let (Ok(start), Ok(end)) = (tl.StartTime(), tl.EndTime()) {
+        let span = (end.Duration - start.Duration) as f64;
+        let target = start.Duration + (span * fraction.clamp(0.0, 1.0) as f64) as i64;
+        let _ = s.TryChangePlaybackPositionAsync(target);
     }
 }
 
@@ -195,7 +248,37 @@ fn read(session: &Session, refresh_cover: bool, cached: Option<Cover>) -> Result
         artist: props.Artist()?.to_string_lossy(),
         playing,
         cover,
+        timeline: read_timeline(session, playing).ok().flatten(),
     })
+}
+
+fn read_timeline(session: &Session, playing: bool) -> Result<Option<Timeline>> {
+    let tl = session.GetTimelineProperties()?;
+    let secs = |t: TimeSpan| t.Duration as f64 / TICKS_PER_SEC;
+    let start = secs(tl.StartTime()?);
+    let duration = secs(tl.EndTime()?) - start;
+    if duration <= 0.0 {
+        return Ok(None);
+    }
+    let mut position = secs(tl.Position()?) - start;
+
+    // La posición es de cuando la app la informó; si está sonando, sumamos lo que pasó desde entonces.
+    if playing {
+        let updated = tl.LastUpdatedTime()?.UniversalTime;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| (d.as_nanos() / 100) as i64 + EPOCH_DIFF_TICKS)
+            .unwrap_or(updated);
+        let since = (now - updated) as f64 / TICKS_PER_SEC;
+        if since > 0.0 && since < duration {
+            position += since;
+        }
+    }
+    Ok(Some(Timeline {
+        position: position.clamp(0.0, duration) as f32,
+        duration: duration as f32,
+        read_at: Instant::now(),
+    }))
 }
 
 /// Decodifica la carátula con WIC (Windows.Graphics.Imaging), ya escalada y recortada al centro

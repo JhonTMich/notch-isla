@@ -12,7 +12,7 @@ mod tray;
 use std::cell::RefCell;
 use std::time::Instant;
 
-use island::{Button, Controls};
+use island::{Button, Controls, Hit};
 use media::NowPlaying;
 use spring::Spring;
 use text::TextRenderer;
@@ -52,6 +52,8 @@ const ANIM_TIMER: usize = 1;
 const FRAME_MS: u32 = 15;
 /// ~30 fps para las barras de audio de la isla contraída: se ven fluidas y cuestan la mitad.
 const BARS_MS: u32 = 33;
+/// 4 fps para la barra de progreso: avanza pocos píxeles por segundo, no hace falta más.
+const PROGRESS_MS: u32 = 250;
 
 /// Qué sigue moviéndose después de dibujar un cuadro.
 struct Motion {
@@ -59,6 +61,8 @@ struct Motion {
     scrolling: bool,
     /// Las barras de audio bailan (isla contraída y música sonando).
     bars: bool,
+    /// La barra de progreso avanza (isla expandida y música sonando).
+    progress: bool,
 }
 
 fn main() -> Result<()> {
@@ -160,6 +164,8 @@ struct App {
     media: Option<NowPlaying>,
     /// Botón bajo el mouse, para resaltarlo.
     hovered_button: Option<Button>,
+    /// El mouse está sobre la barra de progreso.
+    seek_hovered: bool,
     tray: Tray,
     /// Inicio del desplazamiento de textos largos; se reinicia al expandir o cambiar de canción.
     scroll_start: Instant,
@@ -191,6 +197,7 @@ impl App {
             text: TextRenderer::new(scale).ok(),
             media: None,
             hovered_button: None,
+            seek_hovered: false,
             tray: Tray::new(hwnd),
             scroll_start: Instant::now(),
             fullscreen: false,
@@ -254,6 +261,7 @@ impl App {
             self.presence.set_target(0.0);
             self.hovered = false;
             self.hovered_button = None;
+            self.seek_hovered = false;
             self.spring.set_target(0.0);
         }
         self.start_animation();
@@ -264,28 +272,45 @@ impl App {
         self.update_visibility();
     }
 
-    /// Botón en el punto (x, y) de la ventana; sin música no hay botones.
-    fn button_at(&self, x: f32, y: f32) -> Option<Button> {
+    /// Qué hay en el punto (x, y) de la ventana; sin música no hay botones ni barra.
+    fn hit_at(&self, x: f32, y: f32) -> Option<Hit> {
         if !self.visible {
             return None;
         }
-        self.media.as_ref()?;
+        let media = self.media.as_ref()?;
         island::hit_test(
             self.surface.width as f32,
             self.surface.height as f32,
             self.scale,
             self.spring.value,
             self.presence.value,
+            media.timeline.is_some(),
             x,
             y,
         )
     }
 
-    fn set_hovered_button(&mut self, button: Option<Button>) {
-        if self.hovered_button == button {
+    fn set_hover(&mut self, hit: Option<Hit>) {
+        let button = match hit {
+            Some(Hit::Button(b)) => Some(b),
+            _ => None,
+        };
+        let seek = matches!(hit, Some(Hit::Seek(_)));
+        if self.hovered_button == button && self.seek_hovered == seek {
             return;
         }
         self.hovered_button = button;
+        self.seek_hovered = seek;
+        self.redraw();
+    }
+
+    /// Clic en la barra: pide el salto a la app y mueve la barra ya, sin esperar su aviso.
+    fn seek(&mut self, fraction: f32) {
+        media::seek(fraction);
+        if let Some(t) = self.media.as_mut().and_then(|m| m.timeline.as_mut()) {
+            t.position = fraction * t.duration;
+            t.read_at = Instant::now();
+        }
         self.redraw();
     }
 
@@ -381,11 +406,16 @@ impl App {
         let controls = media.map(|m| Controls {
             playing: m.playing,
             hovered: self.hovered_button,
+            seek_hovered: self.seek_hovered,
             accent: cover.map_or([255, 255, 255], |c| c.accent),
+            progress: m.timeline.map(|t| t.progress(m.playing)),
         });
-        let bars = self.visible
-            && self.media.as_ref().is_some_and(|m| m.playing)
-            && island::mini_alpha(self.spring.value) > 0.0;
+        let playing = self.visible && self.media.as_ref().is_some_and(|m| m.playing);
+        let bars = playing && island::mini_alpha(self.spring.value) > 0.0;
+        // El contenido expandido (y con él la barra) se ve a partir de ~55 % de la expansión.
+        let progress = playing
+            && self.spring.value > 0.55
+            && self.media.as_ref().is_some_and(|m| m.timeline.is_some());
         let area = island::draw(
             &mut self.surface.pixmap,
             self.scale,
@@ -456,17 +486,24 @@ impl App {
                 ULW_ALPHA,
             );
         }
-        Motion { scrolling, bars }
+        Motion {
+            scrolling,
+            bars,
+            progress,
+        }
     }
 }
 
 /// Intervalo del temporizador según lo que se mueve: 60 fps para la isla y los textos,
-/// 30 fps si solo bailan las barras, y apagado si todo está quieto.
+/// 30 fps si solo bailan las barras, 4 fps si solo avanza la barra de progreso, y apagado
+/// si todo está quieto.
 fn timer_for(motion: &Motion, moving: bool) -> Option<u32> {
     if moving || motion.scrolling {
         Some(FRAME_MS)
     } else if motion.bars {
         Some(BARS_MS)
+    } else if motion.progress {
+        Some(PROGRESS_MS)
     } else {
         None
     }
@@ -588,25 +625,25 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let (x, y) = mouse_pos(lparam);
             with_app(|app| {
                 app.set_hovered(true);
-                let button = app.button_at(x, y);
-                app.set_hovered_button(button);
+                let hit = app.hit_at(x, y);
+                app.set_hover(hit);
             });
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
             with_app(|app| {
                 app.set_hovered(false);
-                app.set_hovered_button(None);
+                app.set_hover(None);
             });
             LRESULT(0)
         }
         WM_LBUTTONUP => {
             let (x, y) = mouse_pos(lparam);
-            let mut button = None;
-            with_app(|app| button = app.button_at(x, y));
-            if let Some(button) = button {
-                media::press(button);
-            }
+            with_app(|app| match app.hit_at(x, y) {
+                Some(Hit::Button(button)) => media::press(button),
+                Some(Hit::Seek(fraction)) => app.seek(fraction),
+                None => {}
+            });
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == ANIM_TIMER => {

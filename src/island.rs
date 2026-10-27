@@ -10,7 +10,17 @@ use tiny_skia::{
 
 /// (ancho, alto, radio de las esquinas)
 const COLLAPSED: (f32, f32, f32) = (190.0, 34.0, 17.0);
-const EXPANDED: (f32, f32, f32) = (360.0, 56.0, 20.0);
+const EXPANDED: (f32, f32, f32) = (360.0, 68.0, 22.0);
+
+/// Alto lógico de la fila de contenido (carátula, textos, botones); debajo va la barra de progreso.
+const ROW_H: f32 = 56.0;
+/// Barra de progreso: margen lateral, distancia de su centro al borde inferior y grosor
+/// (normal y con el mouse encima), en píxeles lógicos.
+const PROGRESS_INSET: f32 = 14.0;
+const PROGRESS_BOTTOM: f32 = 11.0;
+const PROGRESS_THICK: (f32, f32) = (3.0, 5.0);
+/// Media altura lógica de la zona de clic de la barra (más generosa que la barra dibujada).
+const PROGRESS_HIT: f32 = 7.0;
 
 /// Separación lógica entre el borde superior de la pantalla y la isla.
 const TOP_GAP: f32 = 8.0;
@@ -45,12 +55,24 @@ pub enum Button {
     Next,
 }
 
+/// Lo que hay bajo el mouse en la isla expandida.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Hit {
+    Button(Button),
+    /// Sobre la barra de progreso, en esa fracción (0 a 1) de la canción.
+    Seek(f32),
+}
+
 /// Estado de la reproducción; `None` en `draw` = no hay música (sin botones ni indicador).
 pub struct Controls {
     pub playing: bool,
     pub hovered: Option<Button>,
-    /// Color de las barras de audio (tomado de la carátula).
+    /// El mouse está sobre la barra de progreso (se engrosa).
+    pub seek_hovered: bool,
+    /// Color de las barras de audio y del avance (tomado de la carátula).
     pub accent: [u8; 3],
+    /// Fracción reproducida, o `None` si la app no informa el avance (no se dibuja la barra).
+    pub progress: Option<f32>,
 }
 
 /// Hasta qué progreso de expansión se ve el indicador de la isla contraída.
@@ -79,12 +101,29 @@ struct Geometry {
     r: f32,
     /// Opacidad del contenido: aparece al final de la expansión.
     alpha: f32,
+    scale: f32,
 }
 
 impl Geometry {
-    /// Centro vertical de la isla: ahí se alinea todo el contenido.
+    /// Centro vertical de la isla: ahí se alinea el indicador de la isla contraída.
     fn cy(&self) -> f32 {
         self.y0 + self.h / 2.0
+    }
+
+    /// Centro vertical de la fila de contenido expandida (deja libre la franja de la barra).
+    fn row_cy(&self) -> f32 {
+        self.y0 + self.h.min(ROW_H * self.scale) / 2.0
+    }
+
+    /// Barra de progreso: (x, centro vertical, ancho).
+    fn progress_bar(&self) -> (f32, f32, f32) {
+        let s = self.scale;
+        let x = self.x0 + PROGRESS_INSET * s;
+        (
+            x,
+            self.y0 + self.h - PROGRESS_BOTTOM * s,
+            (self.w - 2.0 * PROGRESS_INSET * s).max(0.0),
+        )
     }
 
     fn x1(&self) -> f32 {
@@ -110,6 +149,7 @@ fn geometry(max_w: f32, max_h: f32, scale: f32, p: f32, presence: f32) -> Geomet
         h,
         r: (lerp(COLLAPSED.2, EXPANDED.2) * scale).clamp(0.0, (w / 2.0).min(h / 2.0)),
         alpha: ((p - 0.55) / 0.45).clamp(0.0, 1.0),
+        scale,
     }
 }
 
@@ -124,7 +164,7 @@ fn text_column(g: &Geometry, s: f32) -> (f32, f32) {
 /// Centros de los botones: a la derecha, en la misma fila que la carátula y el texto.
 fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 3] {
     let next = g.x1() - LAST_BUTTON_INSET * s;
-    let cy = g.cy();
+    let cy = g.row_cy();
     let gap = BUTTON_GAP * s;
     [
         (Button::Prev, next - 2.0 * gap, cy),
@@ -133,25 +173,35 @@ fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 3] {
     ]
 }
 
-/// Botón bajo el punto (x, y) de la ventana, solo si el contenido ya se ve por completo.
+/// Qué hay bajo el punto (x, y) de la ventana, solo si el contenido ya se ve por completo.
+/// `seekable` = la barra de progreso está visible.
+#[allow(clippy::too_many_arguments)]
 pub fn hit_test(
     max_w: f32,
     max_h: f32,
     scale: f32,
     p: f32,
     presence: f32,
+    seekable: bool,
     x: f32,
     y: f32,
-) -> Option<Button> {
+) -> Option<Hit> {
     let g = geometry(max_w, max_h, scale, p, presence);
     if g.alpha < 1.0 {
         return None;
+    }
+    if seekable {
+        let (bx, by, bw) = g.progress_bar();
+        let margin = 4.0 * scale;
+        if (y - by).abs() <= PROGRESS_HIT * scale && x >= bx - margin && x <= bx + bw + margin {
+            return Some(Hit::Seek(((x - bx) / bw.max(1.0)).clamp(0.0, 1.0)));
+        }
     }
     let r = BUTTON_RADIUS * scale;
     button_centers(&g, scale)
         .into_iter()
         .find(|&(_, bx, by)| (x - bx).powi(2) + (y - by).powi(2) <= r * r)
-        .map(|(b, _, _)| b)
+        .map(|(b, _, _)| Hit::Button(b))
 }
 
 /// Dibuja la isla con progreso `p` (0 = contraída, 1 = expandida; puede pasarse un poco por el rebote).
@@ -213,7 +263,7 @@ pub fn draw(
         pixmap,
         cover,
         g.x0 + COVER.0 * s,
-        g.cy() - size / 2.0,
+        g.row_cy() - size / 2.0,
         size,
         COVER.2 * s,
         g.alpha,
@@ -223,6 +273,9 @@ pub fn draw(
         for (button, cx, cy) in button_centers(&g, s) {
             draw_button(pixmap, button, &c, cx, cy, s, g.alpha);
         }
+        if let Some(progress) = c.progress {
+            draw_progress(pixmap, &g, &c, progress);
+        }
     }
 
     // Los textos los dibuja DirectWrite después, en este espacio.
@@ -230,9 +283,38 @@ pub fn draw(
     (text_w > 0.0).then_some(TextArea {
         x: text_x,
         w: text_w,
-        cy: g.cy(),
+        cy: g.row_cy(),
         alpha: g.alpha,
     })
+}
+
+/// Barra de progreso: pista gris tenue y el avance con el color de la carátula.
+fn draw_progress(pixmap: &mut Pixmap, g: &Geometry, c: &Controls, progress: f32) {
+    let (x, cy, w) = g.progress_bar();
+    let thick = if c.seek_hovered {
+        PROGRESS_THICK.1
+    } else {
+        PROGRESS_THICK.0
+    } * g.scale;
+    let y = cy - thick / 2.0;
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(255, 255, 255, (g.alpha * 46.0) as u8);
+    fill_rounded_rect(pixmap, &paint, x, y, w, thick, thick / 2.0);
+    let [r, gr, b] = c.accent;
+    paint.set_color_rgba8(r, gr, b, (g.alpha * 255.0) as u8);
+    // Con avance casi nulo se dibuja al menos un punto redondo, para que se vea el inicio.
+    fill_rounded_rect(
+        pixmap,
+        &paint,
+        x,
+        y,
+        (w * progress).max(thick),
+        thick,
+        thick / 2.0,
+    );
 }
 
 /// Carátula con esquinas redondeadas; sin imagen, un marcador gris.
