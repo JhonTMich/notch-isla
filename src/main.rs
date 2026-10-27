@@ -81,6 +81,10 @@ const INSTALL_DELAY_MS: u32 = 1500;
 /// Fin de la espera del atajo nuevo (si no se presionó nada).
 const CAPTURE_TIMER: usize = 6;
 const CAPTURE_MS: u32 = 10_000;
+/// Espera antes de encogerse cuando el mouse sale de la isla: si sales sin querer o vuelves
+/// enseguida, no se cierra.
+const COLLAPSE_TIMER: usize = 7;
+const COLLAPSE_DELAY_MS: u32 = 800;
 
 /// Cuánto dura cada aviso.
 const NOTICE_MS: u32 = 2500;
@@ -293,6 +297,8 @@ struct App {
     countdown: Option<(Instant, u32)>,
     /// Actualización a instalar en cuanto termine el aviso "Instalando".
     installing: Option<update::Update>,
+    /// El mouse acaba de salir: sigue expandida hasta que vence `COLLAPSE_TIMER`.
+    lingering: bool,
     /// Letras ya consultadas, por canción (`lyrics::key`); vacía = esa canción no tiene.
     lyrics: HashMap<String, Vec<(f32, String)>>,
     /// Canciones cuya letra se está pidiendo ahora.
@@ -351,6 +357,7 @@ impl App {
             audio_device: None,
             countdown: None,
             installing: None,
+            lingering: false,
             lyrics: HashMap::new(),
             lyrics_pending: HashSet::new(),
             projector: None,
@@ -571,7 +578,7 @@ impl App {
 
     /// Expandida mientras el mouse está encima o hay un aviso.
     fn update_expansion(&mut self) {
-        let expand = self.visible && (self.hovered || self.notice.is_some());
+        let expand = self.visible && (self.hovered || self.lingering || self.notice.is_some());
         self.spring.set_target(if expand { 1.0 } else { 0.0 });
         self.start_animation();
     }
@@ -865,6 +872,7 @@ impl App {
             // Sale hacia arriba y a la vez se contrae; la ventana se oculta al terminar (en `tick`).
             self.presence.set_target(0.0);
             self.hovered = false;
+            self.lingering = false;
             self.hovered_button = None;
             self.seek_hovered = false;
             self.cover_hovered = false;
@@ -964,6 +972,15 @@ impl App {
             return;
         }
         self.hovered = hovered;
+        // Al salir sigue expandida un momento (`COLLAPSE_TIMER`); al volver se cancela.
+        self.lingering = !hovered && self.visible;
+        unsafe {
+            if self.lingering {
+                SetTimer(Some(self.hwnd), COLLAPSE_TIMER, COLLAPSE_DELAY_MS, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
+            }
+        }
         if hovered {
             self.stop_idle_countdown();
             // Pide a Windows un aviso (WM_MOUSELEAVE) cuando el mouse salga de la isla.
@@ -980,6 +997,15 @@ impl App {
         } else if self.notice.is_none() {
             self.start_idle_countdown();
         }
+        self.update_expansion();
+    }
+
+    /// Terminó la espera tras salir el mouse: ahora sí se encoge.
+    fn end_linger(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), COLLAPSE_TIMER);
+        }
+        self.lingering = false;
         self.update_expansion();
     }
 
@@ -1532,6 +1558,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 vk: lparam.0 as u32,
             });
             with_app(|app| app.end_hotkey_capture(captured));
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == COLLAPSE_TIMER => {
+            with_app(|app| app.end_linger());
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == CAPTURE_TIMER => {
