@@ -1,6 +1,7 @@
 // En release no se abre consola; en debug sí, para ver mensajes.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
 mod autostart;
 mod fullscreen;
 mod island;
@@ -10,8 +11,9 @@ mod text;
 mod tray;
 
 use std::cell::RefCell;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use audio::Volume;
 use island::{Button, Controls, Hit};
 use media::NowPlaying;
 use spring::Spring;
@@ -28,6 +30,7 @@ use windows::Win32::Graphics::Gdi::{
     BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, HMONITOR,
     MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
@@ -40,8 +43,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, PostQuitMessage, RegisterClassExW, SetTimer, ShowWindow, TranslateMessage,
     UpdateLayeredWindow, IDC_ARROW, MA_NOACTIVATE, MSG, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
     WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Aviso de "el mouse salió de la ventana" (definido aquí para no cargar todo el módulo Win32_UI_Controls).
@@ -54,6 +57,11 @@ const FRAME_MS: u32 = 15;
 const BARS_MS: u32 = 33;
 /// 4 fps para la barra de progreso: avanza pocos píxeles por segundo, no hace falta más.
 const PROGRESS_MS: u32 = 250;
+
+/// Cuánto cambia el volumen por cada "clic" de la rueda (como Windows: 2 %).
+const VOLUME_STEP: f32 = 0.02;
+/// Cuánto tiempo se muestra el nivel de volumen después del último giro de la rueda.
+const VOLUME_SHOW: Duration = Duration::from_millis(1200);
 
 /// Qué sigue moviéndose después de dibujar un cuadro.
 struct Motion {
@@ -73,6 +81,9 @@ fn main() -> Result<()> {
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return Ok(());
         }
+
+        // COM en el hilo de la ventana: lo necesita Core Audio (volumen con la rueda).
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
         // Nítida en pantallas con escalado (125 %, 150 %...).
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -179,6 +190,11 @@ struct App {
     presence: Spring,
     /// Última canción, para dibujarla mientras la isla sale si la música terminó.
     last_media: Option<NowPlaying>,
+    /// Control del volumen; se crea la primera vez que se gira la rueda.
+    volume: Option<Volume>,
+    volume_level: f32,
+    /// Hasta cuándo se muestra el nivel de volumen en la isla.
+    volume_until: Option<Instant>,
 }
 
 impl App {
@@ -205,7 +221,31 @@ impl App {
             shown: false,
             presence: Spring::new(0.0, 260.0, 22.0),
             last_media: None,
+            volume: None,
+            volume_level: 0.0,
+            volume_until: None,
         })
+    }
+
+    fn volume_showing(&self) -> bool {
+        self.volume_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// Rueda del mouse sobre la isla: sube o baja el volumen y lo muestra un momento.
+    fn wheel(&mut self, delta: i16) {
+        if !self.visible {
+            return;
+        }
+        if self.volume.is_none() {
+            self.volume = Volume::new().ok();
+        }
+        let Some(volume) = &self.volume else { return };
+        // `delta` llega en múltiplos de 120 por clic (las ruedas finas mandan fracciones).
+        if let Ok(level) = volume.change(delta as f32 / 120.0 * VOLUME_STEP) {
+            self.volume_level = level;
+            self.volume_until = Some(Instant::now() + VOLUME_SHOW);
+            self.redraw();
+        }
     }
 
     /// Redibuja fuera de la animación; si algo quedó moviéndose, arranca el temporizador.
@@ -284,7 +324,8 @@ impl App {
             self.scale,
             self.spring.value,
             self.presence.value,
-            media.timeline.is_some(),
+            // Mientras se muestra el volumen, la barra no sirve para saltar.
+            media.timeline.is_some() && !self.volume_showing(),
             x,
             y,
         )
@@ -403,19 +444,23 @@ impl App {
         // Si la música acaba de terminar, la isla sale mostrando la última canción, no vacía.
         let media = self.media.as_ref().or(self.last_media.as_ref());
         let cover = media.and_then(|m| m.cover.as_ref());
+        let volume = self.volume_showing().then_some(self.volume_level);
         let controls = media.map(|m| Controls {
             playing: m.playing,
             hovered: self.hovered_button,
             seek_hovered: self.seek_hovered,
             accent: cover.map_or([255, 255, 255], |c| c.accent),
             progress: m.timeline.map(|t| t.progress(m.playing)),
+            volume,
         });
         let playing = self.visible && self.media.as_ref().is_some_and(|m| m.playing);
         let bars = playing && island::mini_alpha(self.spring.value) > 0.0;
         // El contenido expandido (y con él la barra) se ve a partir de ~55 % de la expansión.
-        let progress = playing
+        // Mientras se muestra el volumen también hace falta redibujar: para quitarlo a tiempo.
+        let progress = (playing
             && self.spring.value > 0.55
-            && self.media.as_ref().is_some_and(|m| m.timeline.is_some());
+            && self.media.as_ref().is_some_and(|m| m.timeline.is_some()))
+            || volume.is_some();
         let area = island::draw(
             &mut self.surface.pixmap,
             self.scale,
@@ -436,7 +481,9 @@ impl App {
                         &m.title
                     };
                     let mut subtitle = m.artist.clone();
-                    if !m.playing {
+                    if let Some(level) = volume {
+                        subtitle = format!("Volumen {} %", (level * 100.0).round() as u32);
+                    } else if !m.playing {
                         if !subtitle.is_empty() {
                             subtitle.push_str(" · ");
                         }
@@ -635,6 +682,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 app.set_hovered(false);
                 app.set_hover(None);
             });
+            LRESULT(0)
+        }
+        // Llega a la isla aunque no tenga el foco gracias a la opción de Windows
+        // "Desplazar ventanas inactivas al mantener el puntero sobre ellas" (activa por defecto).
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16;
+            with_app(|app| app.wheel(delta));
             LRESULT(0)
         }
         WM_LBUTTONUP => {

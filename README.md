@@ -33,6 +33,7 @@ El ejecutable final queda en `target\release\notch-isla.exe`.
 - Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que se mueven mientras suena la música.
 - Pasa el mouse sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente.
 - Debajo, una barra de progreso con el color de la carátula; haz clic en ella para saltar a ese punto de la canción (si la app informa el tiempo).
+- Gira la rueda del mouse sobre la isla para subir o bajar el volumen de Windows; la barra muestra el nivel un momento.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
 - Clic derecho en el ícono de la bandeja: **Iniciar con Windows** y **Salir**.
 
@@ -55,6 +56,7 @@ src/
 ├─ media.rs       música actual vía SMTC, carátula y órdenes de reproducción
 ├─ text.rs        título y artista con DirectWrite, desplazamiento de textos largos
 ├─ tray.rs        ícono en la bandeja y su menú
+├─ audio.rs       volumen general con Core Audio (rueda del mouse)
 ├─ autostart.rs   iniciar con Windows (clave Run del usuario)
 └─ fullscreen.rs  ocultar la isla cuando una app está a pantalla completa
 ```

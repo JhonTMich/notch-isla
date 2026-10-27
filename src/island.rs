@@ -73,6 +73,9 @@ pub struct Controls {
     pub accent: [u8; 3],
     /// Fracción reproducida, o `None` si la app no informa el avance (no se dibuja la barra).
     pub progress: Option<f32>,
+    /// Nivel de volumen (0 a 1) mientras se está cambiando con la rueda: la barra lo muestra
+    /// en blanco en lugar del avance.
+    pub volume: Option<f32>,
 }
 
 /// Hasta qué progreso de expansión se ve el indicador de la isla contraída.
@@ -273,8 +276,10 @@ pub fn draw(
         for (button, cx, cy) in button_centers(&g, s) {
             draw_button(pixmap, button, &c, cx, cy, s, g.alpha);
         }
-        if let Some(progress) = c.progress {
-            draw_progress(pixmap, &g, &c, progress);
+        match (c.volume, c.progress) {
+            (Some(volume), _) => draw_progress(pixmap, &g, false, volume, [255, 255, 255]),
+            (None, Some(progress)) => draw_progress(pixmap, &g, c.seek_hovered, progress, c.accent),
+            (None, None) => {}
         }
     }
 
@@ -288,10 +293,11 @@ pub fn draw(
     })
 }
 
-/// Barra de progreso: pista gris tenue y el avance con el color de la carátula.
-fn draw_progress(pixmap: &mut Pixmap, g: &Geometry, c: &Controls, progress: f32) {
+/// Barra inferior: pista gris tenue y el nivel `fraction` en `color` (avance de la canción con
+/// el color de la carátula, o volumen en blanco). `thick` = engrosada por el mouse encima.
+fn draw_progress(pixmap: &mut Pixmap, g: &Geometry, thick: bool, fraction: f32, color: [u8; 3]) {
     let (x, cy, w) = g.progress_bar();
-    let thick = if c.seek_hovered {
+    let thick = if thick {
         PROGRESS_THICK.1
     } else {
         PROGRESS_THICK.0
@@ -303,15 +309,15 @@ fn draw_progress(pixmap: &mut Pixmap, g: &Geometry, c: &Controls, progress: f32)
     };
     paint.set_color_rgba8(255, 255, 255, (g.alpha * 46.0) as u8);
     fill_rounded_rect(pixmap, &paint, x, y, w, thick, thick / 2.0);
-    let [r, gr, b] = c.accent;
+    let [r, gr, b] = color;
     paint.set_color_rgba8(r, gr, b, (g.alpha * 255.0) as u8);
-    // Con avance casi nulo se dibuja al menos un punto redondo, para que se vea el inicio.
+    // Con nivel casi nulo se dibuja al menos un punto redondo, para que se vea el inicio.
     fill_rounded_rect(
         pixmap,
         &paint,
         x,
         y,
-        (w * progress).max(thick),
+        (w * fraction).max(thick),
         thick,
         thick / 2.0,
     );
