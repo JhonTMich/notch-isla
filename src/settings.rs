@@ -4,9 +4,11 @@
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{
-    RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RRF_RT_REG_DWORD,
-    RRF_RT_REG_SZ,
+    RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, REG_SZ,
+    RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
 };
+
+use crate::hotkey::{self, Hotkey};
 
 const KEY: PCWSTR = w!("Software\\NotchIsla");
 
@@ -25,16 +27,28 @@ pub struct Settings {
     pub notices: bool,
     /// Muestra la letra sincronizada (la pide a lrclib.net); apagada si no se activa.
     pub lyrics: bool,
+    /// Atajo para mostrar u ocultar la isla; `None` = desactivado.
+    pub hotkey: Option<Hotkey>,
 }
 
 impl Settings {
     pub fn load() -> Self {
+        // Sin valor guardado, el atajo de siempre; con tecla 0, desactivado.
+        let hotkey = match read_dword(w!("HotkeyKey")) {
+            None => Some(hotkey::DEFAULT),
+            Some(0) => None,
+            Some(vk) => Some(Hotkey {
+                mods: read_dword(w!("HotkeyMods")).unwrap_or(0),
+                vk,
+            }),
+        };
         Self {
             hide_delay: read_dword(w!("HideDelay")).unwrap_or(3),
             monitor: read_string(w!("Monitor")).unwrap_or_default(),
             hide_fullscreen: read_dword(w!("HideFullscreen")).is_none_or(|v| v != 0),
             notices: read_dword(w!("Notices")).is_none_or(|v| v != 0),
             lyrics: read_dword(w!("Lyrics")).is_some_and(|v| v != 0),
+            hotkey,
         }
     }
 
@@ -44,7 +58,38 @@ impl Settings {
         write_dword(w!("HideFullscreen"), self.hide_fullscreen as u32);
         write_dword(w!("Notices"), self.notices as u32);
         write_dword(w!("Lyrics"), self.lyrics as u32);
+        write_dword(w!("HotkeyMods"), self.hotkey.map_or(0, |h| h.mods));
+        write_dword(w!("HotkeyKey"), self.hotkey.map_or(0, |h| h.vk));
     }
+}
+
+/// Versión que se está instalando, anotada antes de cerrar la isla para actualizar
+/// (`None` la borra). Al volver a abrirse, la isla la compara con la suya.
+pub fn set_pending_update(version: Option<&str>) {
+    match version {
+        Some(v) => write_string(w!("UpdatePending"), v),
+        None => unsafe {
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, KEY, w!("UpdatePending"));
+        },
+    }
+}
+
+/// Guarda `current` como la última versión que se abrió y devuelve la anterior (si la había).
+pub fn swap_last_version(current: &str) -> Option<String> {
+    let last = read_string(w!("LastVersion")).filter(|v| !v.is_empty());
+    if last.as_deref() != Some(current) {
+        write_string(w!("LastVersion"), current);
+    }
+    last
+}
+
+/// Lee y borra la versión anotada por `set_pending_update`.
+pub fn take_pending_update() -> Option<String> {
+    let version = read_string(w!("UpdatePending")).filter(|v| !v.is_empty());
+    if version.is_some() {
+        set_pending_update(None);
+    }
+    version
 }
 
 fn read_dword(name: PCWSTR) -> Option<u32> {

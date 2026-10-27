@@ -167,6 +167,12 @@ pub enum NoticeIcon {
     /// Salida de audio (audífonos, parlantes).
     Audio,
     Timer,
+    /// Esperando la combinación del atajo nuevo.
+    Keyboard,
+    /// Actualización: instalándose, instalada o fallida.
+    Installing,
+    Done,
+    Failed,
 }
 
 /// Aviso que ocupa la isla expandida: ícono a la izquierda y textos (los dibuja DirectWrite).
@@ -537,6 +543,55 @@ fn draw_notice_icon(
             pb.move_to(cx - 2.5 * s, cy - 11.0 * s);
             pb.line_to(cx + 2.5 * s, cy - 11.0 * s);
             stroke(pixmap, paint, pb, line);
+        }
+        NoticeIcon::Keyboard => {
+            // Teclado: contorno, dos filas de teclas y la barra espaciadora.
+            if let Some(body) =
+                rounded_rect_path(cx - 10.0 * s, cy - 7.0 * s, 20.0 * s, 14.0 * s, 3.0 * s)
+            {
+                stroke_path(pixmap, paint, &body, 1.6 * s);
+            }
+            for row in [-3.0, 0.5] {
+                for col in [-6.0, -2.0, 2.0, 6.0] {
+                    fill_circle(pixmap, paint, cx + col * s, cy + row * s, 1.1 * s);
+                }
+            }
+            fill_rounded_rect(
+                pixmap,
+                paint,
+                cx - 5.0 * s,
+                cy + 3.3 * s,
+                10.0 * s,
+                1.6 * s,
+                0.8 * s,
+            );
+        }
+        NoticeIcon::Installing => {
+            // Flecha hacia abajo sobre una base: se está instalando.
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx, cy - 8.0 * s);
+            pb.line_to(cx, cy + 3.0 * s);
+            pb.move_to(cx - 4.5 * s, cy - 1.5 * s);
+            pb.line_to(cx, cy + 3.0 * s);
+            pb.line_to(cx + 4.5 * s, cy - 1.5 * s);
+            pb.move_to(cx - 8.0 * s, cy + 8.0 * s);
+            pb.line_to(cx + 8.0 * s, cy + 8.0 * s);
+            stroke(pixmap, paint, pb, line);
+        }
+        NoticeIcon::Done => {
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 7.0 * s, cy);
+            pb.line_to(cx - 2.0 * s, cy + 5.0 * s);
+            pb.line_to(cx + 8.0 * s, cy - 6.0 * s);
+            stroke(pixmap, paint, pb, 2.2 * s);
+        }
+        NoticeIcon::Failed => {
+            // Signo de exclamación.
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx, cy - 8.0 * s);
+            pb.line_to(cx, cy + 2.5 * s);
+            stroke(pixmap, paint, pb, 2.2 * s);
+            fill_circle(pixmap, paint, cx, cy + 7.0 * s, 1.5 * s);
         }
     }
 }

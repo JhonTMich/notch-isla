@@ -18,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ICONINFO, IDI_APPLICATION, SM_CXSMICON, WM_APP,
 };
 
+use crate::hotkey::{self, Hotkey};
 use crate::menu::{self, Item};
 use crate::monitors::{self, Monitor};
 use crate::routing::Output;
@@ -35,6 +36,9 @@ const CMD_NOTICES: usize = 4;
 const CMD_FULLSCREEN: usize = 5;
 const CMD_CANCEL_TIMER: usize = 6;
 const CMD_LYRICS: usize = 7;
+const CMD_HOTKEY_CHANGE: usize = 8;
+const CMD_HOTKEY_DEFAULT: usize = 9;
+const CMD_HOTKEY_OFF: usize = 10;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -60,6 +64,10 @@ pub enum Command {
     ToggleNotices,
     ToggleFullscreen,
     ToggleLyrics,
+    /// Escuchar la próxima combinación de teclas como atajo nuevo.
+    ChangeHotkey,
+    /// Atajo elegido: el de siempre, o `None` para desactivarlo.
+    SetHotkey(Option<Hotkey>),
 }
 
 /// Lo que el menú necesita saber para marcar las opciones actuales.
@@ -242,9 +250,22 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
         autostart::is_enabled(),
     ));
     items.push(Item::Separator);
-    items.push(Item::Label(
-        "Mostrar u ocultar la isla: Ctrl + Alt + N".to_string(),
-    ));
+    let current = settings
+        .hotkey
+        .map_or("desactivado".to_string(), |h| h.name());
+    let default_name = format!("{} (predeterminado)", hotkey::DEFAULT.name());
+    items.push(Item::Group {
+        label: format!("Atajo para mostrar u ocultar: {current}"),
+        items: vec![
+            action(CMD_HOTKEY_CHANGE, "Cambiar atajo...", false),
+            action(
+                CMD_HOTKEY_DEFAULT,
+                &default_name,
+                settings.hotkey == Some(hotkey::DEFAULT),
+            ),
+            action(CMD_HOTKEY_OFF, "Desactivado", settings.hotkey.is_none()),
+        ],
+    });
     items.push(Item::Separator);
     items.push(action(CMD_EXIT, "Salir", false));
 
@@ -258,6 +279,9 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
         CMD_FULLSCREEN => Some(Command::ToggleFullscreen),
         CMD_CANCEL_TIMER => Some(Command::CancelTimer),
         CMD_LYRICS => Some(Command::ToggleLyrics),
+        CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
+        CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
+        CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),
         _ => {
             if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
                 Some(Command::HideDelay(HIDE_DELAYS[i]))

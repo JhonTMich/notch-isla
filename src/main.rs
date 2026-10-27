@@ -5,6 +5,7 @@ mod appicon;
 mod audio;
 mod autostart;
 mod fullscreen;
+mod hotkey;
 mod island;
 mod lyrics;
 mod media;
@@ -50,9 +51,7 @@ use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     MDT_EFFECTIVE_DPI,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, TrackMouseEvent, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, TME_LEAVE, TRACKMOUSEEVENT,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
@@ -74,17 +73,24 @@ const IDLE_TIMER: usize = 2;
 const NOTICE_TIMER: usize = 3;
 /// El temporizador que el usuario puso desde la bandeja.
 const COUNTDOWN_TIMER: usize = 4;
-
-/// Atajo global Ctrl + Alt + N: muestra u oculta la isla.
-const HOTKEY_TOGGLE: i32 = 1;
+/// Espera entre el aviso "Instalando" y el cierre de la isla para instalar.
+const INSTALL_TIMER: usize = 5;
+const INSTALL_DELAY_MS: u32 = 1500;
+/// Fin de la espera del atajo nuevo (si no se presionó nada).
+const CAPTURE_TIMER: usize = 6;
+const CAPTURE_MS: u32 = 10_000;
 
 /// Cuánto dura cada aviso.
 const NOTICE_MS: u32 = 2500;
 const NOTICE_TIMER_DONE_MS: u32 = 8000;
+const NOTICE_UPDATE_MS: u32 = 6000;
 
-/// Colores de los avisos: salida de audio y temporizador.
+/// Colores de los avisos: salida de audio e instalación, temporizador, actualización lista y
+/// fallida.
 const BLUE: [u8; 3] = [10, 132, 255];
 const ORANGE: [u8; 3] = [255, 159, 10];
+const GREEN: [u8; 3] = [48, 209, 88];
+const RED: [u8; 3] = [255, 69, 58];
 
 /// ~60 fps. El temporizador solo existe mientras hay animación: en reposo la CPU queda en 0%.
 const FRAME_MS: u32 = 15;
@@ -118,6 +124,13 @@ struct Motion {
 
 fn main() -> Result<()> {
     unsafe {
+        // Copia temporal lanzada para actualizar: espera al instalador y vuelve a abrir la isla.
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some(update::UPDATER_FLAG) {
+            update::run_updater(&args[2..]);
+            return Ok(());
+        }
+
         // Una sola isla: si ya hay otra abierta, esta se cierra sin hacer nada.
         // El mutex vive mientras `_instance` exista, es decir, hasta que termine `main`.
         let _instance = CreateMutexW(None, false, w!("Local\\NotchIsla.Instancia"))?;
@@ -177,13 +190,14 @@ fn main() -> Result<()> {
             app.audio = AudioWatch::new(hwnd).ok();
             app.audio_device = app.audio.as_ref().and_then(AudioWatch::device_name);
         });
+        // Si se acaba de instalar una actualización desde la isla, se avisa cómo salió.
+        if let Some((ok, version)) = update::take_install_result() {
+            with_app(|app| app.install_result(ok, &version));
+        }
         // Si otra app ya usa el atajo, simplemente no hay atajo.
-        let _ = RegisterHotKey(
-            Some(hwnd),
-            HOTKEY_TOGGLE,
-            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
-            'N' as u32,
-        );
+        with_app(|app| {
+            hotkey::register(hwnd, app.settings.hotkey);
+        });
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -275,6 +289,8 @@ struct App {
     audio_device: Option<String>,
     /// Temporizador en marcha: cuándo termina y de cuántos minutos es.
     countdown: Option<(Instant, u32)>,
+    /// Actualización a instalar en cuanto termine el aviso "Instalando".
+    installing: Option<update::Update>,
     /// Letras ya consultadas, por canción (`lyrics::key`); vacía = esa canción no tiene.
     lyrics: HashMap<String, Vec<(f32, String)>>,
     /// Canciones cuya letra se está pidiendo ahora.
@@ -330,6 +346,7 @@ impl App {
             audio: None,
             audio_device: None,
             countdown: None,
+            installing: None,
             lyrics: HashMap::new(),
             lyrics_pending: HashSet::new(),
             projector: None,
@@ -448,6 +465,63 @@ impl App {
         self.countdown = None;
     }
 
+    /// Clic en "Instalar": avisa que empieza y, tras un momento para leerlo, se cierra para
+    /// instalar (ver `INSTALL_TIMER`).
+    fn begin_install(&mut self, update: update::Update) {
+        if self.installing.is_some() {
+            return;
+        }
+        let title = format!("Instalando la versión {}", update.version);
+        self.announce(
+            Notice {
+                icon: NoticeIcon::Installing,
+                color: BLUE,
+            },
+            &title,
+            "La isla se cierra y vuelve en unos segundos",
+            INSTALL_DELAY_MS + 2000,
+        );
+        self.installing = Some(update);
+        unsafe {
+            SetTimer(Some(self.hwnd), INSTALL_TIMER, INSTALL_DELAY_MS, None);
+        }
+    }
+
+    /// Al abrirse tras una actualización: avisa si quedó instalada la versión nueva o no.
+    fn install_result(&mut self, ok: bool, version: &str) {
+        if ok {
+            self.announce(
+                Notice {
+                    icon: NoticeIcon::Done,
+                    color: GREEN,
+                },
+                "Notch Isla se actualizó",
+                &format!("Ahora tienes la versión {version}"),
+                NOTICE_UPDATE_MS,
+            );
+        } else {
+            let current = env!("CARGO_PKG_VERSION");
+            self.announce(
+                Notice {
+                    icon: NoticeIcon::Failed,
+                    color: RED,
+                },
+                &format!("No se pudo instalar la versión {version}"),
+                &format!("Sigues con la {current}; se volverá a ofrecer"),
+                NOTICE_UPDATE_MS,
+            );
+        }
+    }
+
+    /// Aviso en la isla o, si no puede mostrarse (pantalla completa), notificación de Windows.
+    fn announce(&mut self, view: Notice, title: &str, subtitle: &str, ms: u32) {
+        if self.hidden_by_fullscreen() {
+            self.tray.notify(title, subtitle);
+        } else {
+            self.show_notice(view, title, subtitle, ms);
+        }
+    }
+
     /// Se acabó el tiempo: suena y avisa. Si la isla no puede mostrarse (pantalla completa),
     /// el aviso va como notificación de Windows.
     fn countdown_done(&mut self) {
@@ -497,13 +571,100 @@ impl App {
         self.start_animation();
     }
 
+    /// Usa `hotkey` como atajo (o lo desactiva con `None`), lo guarda y avisa. Si otra app ya
+    /// usa esa combinación, vuelve `previous`.
+    fn set_hotkey(&mut self, hotkey: Option<hotkey::Hotkey>, previous: Option<hotkey::Hotkey>) {
+        let keyboard = Notice {
+            icon: NoticeIcon::Keyboard,
+            color: BLUE,
+        };
+        if hotkey::register(self.hwnd, hotkey) {
+            self.settings.hotkey = hotkey;
+            self.settings.save();
+            let subtitle = hotkey.map_or("Desactivado".to_string(), |h| h.name());
+            self.show_notice(
+                keyboard,
+                "Atajo para mostrar u ocultar",
+                &subtitle,
+                NOTICE_MS,
+            );
+        } else {
+            hotkey::register(self.hwnd, previous);
+            self.settings.hotkey = previous;
+            self.settings.save();
+            let name = hotkey.map(|h| h.name()).unwrap_or_default();
+            self.show_notice(
+                Notice {
+                    icon: NoticeIcon::Failed,
+                    color: RED,
+                },
+                &format!("{name} ya lo usa otra app"),
+                "El atajo no cambió",
+                NOTICE_UPDATE_MS,
+            );
+        }
+    }
+
+    /// "Cambiar atajo...": la isla espera la próxima combinación de teclas.
+    fn begin_hotkey_capture(&mut self) {
+        // Sin el atajo registrado, también se puede volver a elegir el mismo.
+        hotkey::register(self.hwnd, None);
+        if !hotkey::start_capture(self.hwnd) {
+            hotkey::register(self.hwnd, self.settings.hotkey);
+            return;
+        }
+        unsafe {
+            SetTimer(Some(self.hwnd), CAPTURE_TIMER, CAPTURE_MS, None);
+        }
+        self.show_notice(
+            Notice {
+                icon: NoticeIcon::Keyboard,
+                color: BLUE,
+            },
+            "Presiona el atajo nuevo",
+            "Ctrl, Alt o Win más una tecla; Esc cancela",
+            CAPTURE_MS,
+        );
+    }
+
+    /// Terminó la espera del atajo: `captured` = la combinación, o `None` si se canceló.
+    fn end_hotkey_capture(&mut self, captured: Option<hotkey::Hotkey>) {
+        hotkey::stop_capture();
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), CAPTURE_TIMER);
+        }
+        match captured {
+            Some(h) => self.set_hotkey(Some(h), self.settings.hotkey),
+            None => {
+                hotkey::register(self.hwnd, self.settings.hotkey);
+                let subtitle = self
+                    .settings
+                    .hotkey
+                    .map_or("Desactivado".to_string(), |h| h.name());
+                self.show_notice(
+                    Notice {
+                        icon: NoticeIcon::Keyboard,
+                        color: BLUE,
+                    },
+                    "El atajo no cambió",
+                    &subtitle,
+                    NOTICE_MS,
+                );
+            }
+        }
+    }
+
     /// Ajustes cambiados desde la bandeja (ya guardados).
     fn apply_settings(&mut self, settings: Settings) {
         let moved = settings.monitor != self.settings.monitor;
         let delay_changed = settings.hide_delay != self.settings.hide_delay;
+        let previous_hotkey = self.settings.hotkey;
         self.settings = settings;
         if moved {
             self.relayout();
+        }
+        if self.settings.hotkey != previous_hotkey {
+            self.set_hotkey(self.settings.hotkey, previous_hotkey);
         }
         // Recién activada: se pide la letra de lo que suena ahora.
         self.request_lyrics();
@@ -1162,13 +1323,43 @@ impl Drop for Surface {
     }
 }
 
-/// Instala la versión nueva (y cierra la isla: el instalador la vuelve a abrir) o abre la
-/// página de descarga.
-fn apply_update(hwnd: HWND, update: Option<&update::Update>) {
-    if update.is_some_and(update::Update::apply) {
+/// Instala la versión nueva (primero avisa "Instalando" y luego se cierra, ver
+/// `begin_install`) o, si no está descargada, abre la página de descarga.
+fn apply_update(update: Option<&update::Update>) {
+    let Some(update) = update else { return };
+    if update.installer.is_some() {
+        with_app(|app| app.begin_install(update.clone()));
+    } else {
+        update.apply();
+    }
+}
+
+/// Pasó la espera tras el aviso "Instalando": se lanza la instalación y se cierra la isla.
+/// Va fuera de `with_app`: cerrar la ventana necesita el estado de la app libre.
+fn finish_install(hwnd: HWND) {
+    unsafe {
+        let _ = KillTimer(Some(hwnd), INSTALL_TIMER);
+    }
+    let mut update = None;
+    with_app(|app| update = app.installing.take());
+    let Some(update) = update else { return };
+    if update.apply() {
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
+    } else {
+        // No arrancó: `apply` abrió la página de descarga.
+        with_app(|app| {
+            app.announce(
+                Notice {
+                    icon: NoticeIcon::Failed,
+                    color: RED,
+                },
+                "No se pudo iniciar la instalación",
+                "Se abrió la página de descarga",
+                NOTICE_UPDATE_MS,
+            )
+        });
     }
 }
 
@@ -1271,7 +1462,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 None => {}
             });
             if pending.is_some() {
-                apply_update(hwnd, pending.as_ref());
+                apply_update(pending.as_ref());
             }
             LRESULT(0)
         }
@@ -1304,12 +1495,28 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_app(|app| app.countdown_done());
             LRESULT(0)
         }
+        WM_TIMER if wparam.0 == INSTALL_TIMER => {
+            finish_install(hwnd);
+            LRESULT(0)
+        }
         system::WM_AUDIO_DEVICE => {
             with_app(|app| app.on_audio_device());
             LRESULT(0)
         }
-        WM_HOTKEY if wparam.0 as i32 == HOTKEY_TOGGLE => {
+        WM_HOTKEY if hotkey::is_ours(wparam) => {
             with_app(|app| app.toggle_hidden());
+            LRESULT(0)
+        }
+        hotkey::WM_HOTKEY_CAPTURED => {
+            let captured = (lparam.0 != 0).then_some(hotkey::Hotkey {
+                mods: wparam.0 as u32,
+                vk: lparam.0 as u32,
+            });
+            with_app(|app| app.end_hotkey_capture(captured));
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == CAPTURE_TIMER => {
+            with_app(|app| app.end_hotkey_capture(None));
             LRESULT(0)
         }
         media::WM_MEDIA => {
@@ -1360,7 +1567,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 timer_left = app.countdown_left();
             });
             if event == NIN_BALLOONUSERCLICK {
-                apply_update(hwnd, pending.as_ref());
+                apply_update(pending.as_ref());
             } else if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
                 let Some(mut settings) = settings else {
                     return LRESULT(0);
@@ -1376,7 +1583,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 use tray::Command;
                 match tray::show_menu(&state) {
                     Some(Command::ToggleAutostart) => autostart::set(!autostart::is_enabled()),
-                    Some(Command::Update) => apply_update(hwnd, pending.as_ref()),
+                    Some(Command::Update) => apply_update(pending.as_ref()),
                     Some(Command::Exit) => unsafe {
                         let _ = DestroyWindow(hwnd);
                     },
@@ -1386,12 +1593,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     Some(Command::CancelTimer) => {
                         with_app(|app| app.cancel_countdown());
                     }
+                    Some(Command::ChangeHotkey) => {
+                        with_app(|app| app.begin_hotkey_capture());
+                    }
                     Some(command) => {
                         match command {
                             Command::HideDelay(secs) => settings.hide_delay = secs,
                             Command::Monitor(i) => settings.monitor = monitors[i].device.clone(),
                             Command::ToggleNotices => settings.notices = !settings.notices,
                             Command::ToggleLyrics => settings.lyrics = !settings.lyrics,
+                            Command::SetHotkey(h) => settings.hotkey = h,
                             Command::ToggleFullscreen => {
                                 settings.hide_fullscreen = !settings.hide_fullscreen
                             }

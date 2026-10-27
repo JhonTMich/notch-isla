@@ -49,7 +49,7 @@ cargo run --example icon
 **Uso:**
 
 - La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
-- Si no la usas, a los 3 s (se cambia en la bandeja) sube y se oculta para no tapar lo que hay debajo (pestañas del navegador, etc.). Queda una línea fina en el borde superior, con el avance de la canción en el color de la carátula; lleva el mouse a esa línea para traer la isla de vuelta. **Ctrl + Alt + N** la oculta o la trae en cualquier momento.
+- Si no la usas, a los 3 s (se cambia en la bandeja) sube y se oculta para no tapar lo que hay debajo (pestañas del navegador, etc.). Queda una línea fina en el borde superior, con el avance de la canción en el color de la carátula; lleva el mouse a esa línea para traer la isla de vuelta. **Ctrl + Alt + N** la oculta o la trae en cualquier momento; el atajo se cambia o se desactiva en la bandeja (**Cambiar atajo...** espera la combinación que presiones: Ctrl, Alt o Win más una tecla).
 - Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que se mueven mientras suena la música.
 - Pasa el mouse sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente.
 - En la esquina de la carátula, el ícono de la app que suena (Spotify, Chrome...). Si hay varias apps con música, unos puntos bajo la carátula lo indican y un clic en ella pasa a la siguiente.
@@ -65,7 +65,7 @@ cargo run --example icon
   - **Temporizador**: de 5 a 60 minutos; al terminar suena y la isla avisa.
   - **Avisar al cambiar la salida de audio**, **Ocultar en pantalla completa**, **Iniciar con Windows** y **Salir**.
   - Los ajustes se guardan en `HKEY_CURRENT_USER\Software\NotchIsla`.
-- Al minuto de abrirse y luego cada 6 horas, consulta en GitHub si hay una versión nueva. Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).
+- Al minuto de abrirse y luego cada 6 horas, consulta en GitHub si hay una versión nueva. Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La isla avisa "Instalando la versión X" antes de cerrarse y, al volver, "Notch Isla se actualizó" o "No se pudo instalar la versión X". Si la instalación falla, un ayudante (una copia temporal de la app) vuelve a abrir la isla igual, así nunca queda cerrada sin aviso. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).
 
 ## Cómo está hecha
 
@@ -89,6 +89,7 @@ src/
 ├─ text.rs        título y artista con DirectWrite, desplazamiento de textos largos
 ├─ tray.rs        ícono en la bandeja y su menú
 ├─ menu.rs        menús con el estilo de la isla (bandeja y clic derecho sobre la isla)
+├─ hotkey.rs      atajo de teclado para mostrar u ocultar la isla (cambiable o desactivable)
 ├─ settings.rs    ajustes del menú, guardados en el registro del usuario
 ├─ monitors.rs    pantallas conectadas, para elegir dónde va la isla
 ├─ system.rs      aviso de cambio de salida de audio (eventos de Core Audio)

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HWND, LPARAM, WPARAM};
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
     WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
@@ -19,10 +19,11 @@ use windows::Win32::Networking::WinHttp::{
 };
 use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDLE};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL, WM_APP};
 
-use crate::autostart;
+use crate::{autostart, settings};
 
 /// Mensaje con la actualización encontrada (`Box<Update>` en lparam).
 pub const WM_UPDATE: u32 = WM_APP + 4;
@@ -144,7 +145,7 @@ impl Update {
     /// si no, abre la página de descarga.
     pub fn apply(&self) -> bool {
         if let Some(installer) = &self.installer {
-            if install(installer) {
+            if install(installer, &self.version) {
                 return true;
             }
         }
@@ -167,29 +168,125 @@ fn open_download_page() {
     }
 }
 
-/// Ejecuta el instalador sin ventanas. Devuelve `true` si arrancó: entonces la app debe
-/// cerrarse, y el instalador la vuelve a abrir al terminar.
-fn install(installer: &Path) -> bool {
+/// Opciones del instalador para instalar sin ventanas.
+const SILENT: [&str; 4] = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"];
+
+/// Argumento con el que la app arranca como ayudante de la actualización (ver `run_updater`).
+pub const UPDATER_FLAG: &str = "--actualizar";
+
+/// Instala `installer` (la versión `version`) sin ventanas. Devuelve `true` si arrancó:
+/// entonces la app debe cerrarse para dejar instalar.
+///
+/// No se ejecuta el instalador directamente: se lanza una copia de esta app en la carpeta
+/// temporal como ayudante (`run_updater`), que espera al instalador y se asegura de que la isla
+/// vuelva a abrirse, aunque la instalación falle. Antes se anota qué versión se está
+/// instalando: al abrirse de nuevo, la isla compara y avisa si se actualizó o no.
+fn install(installer: &Path, version: &str) -> bool {
     // Respeta "Iniciar con Windows" tal como está ahora, aunque se haya cambiado desde la bandeja.
     let tasks = if autostart::is_enabled() {
         "/MERGETASKS=autostart"
     } else {
         "/MERGETASKS=!autostart"
     };
-    std::process::Command::new(installer)
-        .args([
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/SP-",
-            tasks,
-        ])
-        .spawn()
+    settings::set_pending_update(Some(version));
+    // La copia va fuera de la carpeta de la app: el instalador reemplaza ese .exe.
+    let helper = std::env::temp_dir().join("notch-isla-actualizador.exe");
+    let started = std::env::current_exe()
+        .and_then(|exe| std::fs::copy(exe, &helper))
+        .and_then(|_| {
+            std::process::Command::new(&helper)
+                .arg(UPDATER_FLAG)
+                .arg(installer)
+                .arg(tasks)
+                .spawn()
+        })
         .is_ok()
+        // Sin ayudante (no se pudo copiar), el instalador solo: igual vuelve a abrir la isla
+        // si termina bien.
+        || std::process::Command::new(installer)
+            .args(SILENT)
+            .arg(tasks)
+            .spawn()
+            .is_ok();
+    if !started {
+        settings::set_pending_update(None);
+    }
+    started
 }
 
-/// La app corre desde la carpeta donde la dejó el instalador (y no como .exe portable).
-fn is_installed() -> bool {
+/// Modo ayudante: la isla ya se cerró. Corre el instalador, espera a que termine y, si la isla
+/// no volvió a abrirse (la instalación falló, o el instalador no la abrió), la abre. Así nunca
+/// queda cerrada sin avisar; al abrirse, la isla dice si se actualizó.
+pub fn run_updater(args: &[String]) {
+    let (Some(installer), Some(tasks)) = (args.first(), args.get(1)) else {
+        return;
+    };
+    let _ = std::process::Command::new(installer)
+        .args(SILENT)
+        .arg(tasks)
+        .status();
+    // Si salió bien, el instalador ya abrió la isla; se le dan unos segundos.
+    for _ in 0..20 {
+        if island_running() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if let Some(exe) = install_location().map(|dir| dir.join("notch-isla.exe")) {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+}
+
+/// Hay una isla abierta (existe su candado de instancia única, ver `main`).
+fn island_running() -> bool {
+    unsafe {
+        match OpenMutexW(
+            SYNCHRONIZATION_SYNCHRONIZE,
+            false,
+            w!("Local\\NotchIsla.Instancia"),
+        ) {
+            Ok(handle) => {
+                let _ = CloseHandle(handle);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Cómo salió la última actualización, al abrirse la isla: `(true, versión)` si ahora corre
+/// la versión nueva, `(false, versión)` si la que `install` dejó anotada no quedó instalada,
+/// `None` si no hubo actualización. Se avisa una sola vez.
+///
+/// Si no hay nada anotado pero esta versión es más nueva que la última que se abrió, también
+/// cuenta como actualizada: pasa al instalar a mano o desde una isla anterior a este aviso.
+pub fn take_install_result() -> Option<(bool, String)> {
+    let current = current_version();
+    let last = settings::swap_last_version(&current);
+    if let Some(version) = settings::take_pending_update() {
+        let ok = version == current;
+        return Some((ok, if ok { current } else { version }));
+    }
+    match last {
+        Some(last) => is_newer(&current, &last).then_some((true, current)),
+        // Las islas de antes de este aviso no anotaban la versión: si el instalador de esta
+        // versión se descargó hace unos minutos, es que la isla se acaba de actualizar sola.
+        None => just_installed(&current).then_some((true, current)),
+    }
+}
+
+/// El instalador de `version` está en la carpeta temporal y se escribió hace poco.
+fn just_installed(version: &str) -> bool {
+    let path = std::env::temp_dir().join(format!("notch-isla-setup-{version}.exe"));
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < Duration::from_secs(15 * 60))
+}
+
+/// Carpeta donde instaló la app el instalador (según su entrada en "Aplicaciones instaladas").
+fn install_location() -> Option<PathBuf> {
     let mut buf = [0u16; 1024];
     let mut size = std::mem::size_of_val(&buf) as u32;
     let found = unsafe {
@@ -204,10 +301,17 @@ fn is_installed() -> bool {
         )
     } == ERROR_SUCCESS;
     if !found {
-        return false;
+        return None;
     }
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    let location = PathBuf::from(String::from_utf16_lossy(&buf[..len]));
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+}
+
+/// La app corre desde la carpeta donde la dejó el instalador (y no como .exe portable).
+fn is_installed() -> bool {
+    let Some(location) = install_location() else {
+        return false;
+    };
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
