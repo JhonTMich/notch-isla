@@ -1,16 +1,27 @@
 // En release no se abre consola; en debug sí, para ver mensajes.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
+mod fullscreen;
 mod island;
+mod media;
 mod spring;
+mod text;
+mod tray;
 
 use std::cell::RefCell;
 use std::time::Instant;
 
+use island::{Button, Controls};
+use media::NowPlaying;
 use spring::Spring;
+use text::TextRenderer;
 use tiny_skia::Pixmap;
+use tray::Tray;
 use windows::core::{w, Result};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{
+    GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetMonitorInfoW,
     MonitorFromPoint, MonitorFromWindow, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
@@ -18,6 +29,7 @@ use windows::Win32::Graphics::Gdi::{
     MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     MDT_EFFECTIVE_DPI,
@@ -26,9 +38,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TR
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
     LoadCursorW, PostQuitMessage, RegisterClassExW, SetTimer, ShowWindow, TranslateMessage,
-    UpdateLayeredWindow, IDC_ARROW, MA_NOACTIVATE, MSG, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    UpdateLayeredWindow, IDC_ARROW, MA_NOACTIVATE, MSG, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
+    WM_CONTEXTMENU, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Aviso de "el mouse salió de la ventana" (definido aquí para no cargar todo el módulo Win32_UI_Controls).
@@ -40,6 +53,13 @@ const FRAME_MS: u32 = 15;
 
 fn main() -> Result<()> {
     unsafe {
+        // Una sola isla: si ya hay otra abierta, esta se cierra sin hacer nada.
+        // El mutex vive mientras `_instance` exista, es decir, hasta que termine `main`.
+        let _instance = CreateMutexW(None, false, w!("Local\\NotchIsla.Instancia"))?;
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            return Ok(());
+        }
+
         // Nítida en pantallas con escalado (125 %, 150 %...).
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
@@ -79,7 +99,9 @@ fn main() -> Result<()> {
         app.render();
         APP.with(|cell| *cell.borrow_mut() = Some(app));
 
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        // La ventana empieza oculta: aparece cuando SMTC reporte música (ver `update_visibility`).
+        media::start(hwnd);
+        fullscreen::register(hwnd);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -120,6 +142,17 @@ struct App {
     hovered: bool,
     timer_on: bool,
     last_tick: Instant,
+    /// Si DirectWrite fallara, la isla sigue funcionando sin texto.
+    text: Option<TextRenderer>,
+    media: Option<NowPlaying>,
+    /// Botón bajo el mouse, para resaltarlo.
+    hovered_button: Option<Button>,
+    tray: Tray,
+    /// Inicio del desplazamiento de textos largos; se reinicia al expandir o cambiar de canción.
+    scroll_start: Instant,
+    /// Hay una app a pantalla completa en el monitor de la isla.
+    fullscreen: bool,
+    visible: bool,
 }
 
 impl App {
@@ -134,7 +167,90 @@ impl App {
             hovered: false,
             timer_on: false,
             last_tick: Instant::now(),
+            text: TextRenderer::new(scale).ok(),
+            media: None,
+            hovered_button: None,
+            tray: Tray::new(hwnd),
+            scroll_start: Instant::now(),
+            fullscreen: false,
+            visible: false,
         })
+    }
+
+    /// Redibuja fuera de la animación; si un texto quedó desplazándose, arranca el temporizador.
+    fn redraw(&mut self) {
+        if !self.timer_on && self.render() {
+            self.start_animation();
+        }
+    }
+
+    /// La isla se muestra solo si hay música y nada está a pantalla completa.
+    fn update_visibility(&mut self) {
+        let want = self.media.is_some() && !self.fullscreen;
+        if want == self.visible {
+            return;
+        }
+        self.visible = want;
+        unsafe {
+            if want {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            } else {
+                // Al ocultarse vuelve contraída y quieta, lista para reaparecer.
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+                self.hovered = false;
+                self.hovered_button = None;
+                self.spring.snap(0.0);
+                if self.timer_on {
+                    let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
+                    self.timer_on = false;
+                }
+                self.render();
+            }
+        }
+    }
+
+    fn set_fullscreen(&mut self, fullscreen: bool) {
+        self.fullscreen = fullscreen;
+        self.update_visibility();
+    }
+
+    /// Botón en el punto (x, y) de la ventana; sin música no hay botones.
+    fn button_at(&self, x: f32, y: f32) -> Option<Button> {
+        self.media.as_ref()?;
+        island::hit_test(
+            self.surface.width as f32,
+            self.surface.height as f32,
+            self.scale,
+            self.spring.value,
+            x,
+            y,
+        )
+    }
+
+    fn set_hovered_button(&mut self, button: Option<Button>) {
+        if self.hovered_button == button {
+            return;
+        }
+        self.hovered_button = button;
+        self.redraw();
+    }
+
+    fn set_media(&mut self, media: Option<NowPlaying>) {
+        // SMTC repite eventos sin cambios reales; solo redibujamos si algo cambió.
+        if self.media == media {
+            return;
+        }
+        let same_text = matches!(
+            (&self.media, &media),
+            (Some(a), Some(b)) if a.title == b.title && a.artist == b.artist
+        );
+        if !same_text {
+            // Canción nueva: el desplazamiento empieza otra vez desde el principio.
+            self.scroll_start = Instant::now();
+        }
+        self.media = media;
+        self.update_visibility();
+        self.redraw();
     }
 
     fn set_hovered(&mut self, hovered: bool) {
@@ -153,6 +269,7 @@ impl App {
             unsafe {
                 let _ = TrackMouseEvent(&mut tme);
             }
+            self.scroll_start = Instant::now();
         }
         self.spring.set_target(if hovered { 1.0 } else { 0.0 });
         self.start_animation();
@@ -174,9 +291,10 @@ impl App {
         self.last_tick = now;
 
         let moving = self.spring.step(dt);
-        self.render();
+        let scrolling = self.render();
 
-        if !moving {
+        // El temporizador sigue solo mientras algo se mueve: la isla o un texto largo.
+        if !moving && !scrolling {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
             }
@@ -191,13 +309,63 @@ impl App {
             self.surface = surface;
             self.pos = pos;
             self.scale = scale;
+            if let Some(text) = self.text.as_mut() {
+                text.set_scale(scale);
+            }
             self.render();
         }
     }
 
-    fn render(&mut self) {
-        island::draw(&mut self.surface.pixmap, self.scale, self.spring.value);
+    /// Dibuja el cuadro actual. Devuelve `true` si algún texto se está desplazando.
+    fn render(&mut self) -> bool {
+        let controls = self.media.as_ref().map(|m| Controls {
+            playing: m.playing,
+            hovered: self.hovered_button,
+        });
+        let area = island::draw(
+            &mut self.surface.pixmap,
+            self.scale,
+            self.spring.value,
+            controls,
+            self.media
+                .as_ref()
+                .and_then(|m| m.cover.as_ref())
+                .map(|c| c.0.as_ref()),
+        );
         self.surface.copy_to_dib();
+        let mut scrolling = false;
+        if let (Some(area), Some(text)) = (area, self.text.as_mut()) {
+            let (title, subtitle) = match &self.media {
+                Some(m) => {
+                    let title = if m.title.is_empty() {
+                        "Sin título"
+                    } else {
+                        &m.title
+                    };
+                    let mut subtitle = m.artist.clone();
+                    if !m.playing {
+                        if !subtitle.is_empty() {
+                            subtitle.push_str(" · ");
+                        }
+                        subtitle.push_str("En pausa");
+                    }
+                    (title.to_string(), subtitle)
+                }
+                None => (
+                    "Nada en reproducción".to_string(),
+                    "Pon música en cualquier app".to_string(),
+                ),
+            };
+            scrolling = text.draw(
+                self.surface.dc,
+                self.surface.width,
+                self.surface.height,
+                &area,
+                &title,
+                &subtitle,
+                self.scroll_start.elapsed().as_secs_f32(),
+            );
+        }
 
         let size = SIZE {
             cx: self.surface.width as i32,
@@ -224,6 +392,7 @@ impl App {
                 ULW_ALPHA,
             );
         }
+        scrolling
     }
 }
 
@@ -307,8 +476,10 @@ impl Surface {
         let len = (self.width * self.height * 4) as usize;
         let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, len) };
         for (d, s) in dst
-            .chunks_exact_mut(4)
-            .zip(self.pixmap.data().chunks_exact(4))
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(self.pixmap.data().as_chunks::<4>().0)
         {
             d[0] = s[2];
             d[1] = s[1];
@@ -328,35 +499,85 @@ impl Drop for Surface {
     }
 }
 
+/// Coordenadas del mouse en la ventana (con signo, como GET_X_LPARAM / GET_Y_LPARAM).
+fn mouse_pos(lparam: LPARAM) -> (f32, f32) {
+    let x = (lparam.0 & 0xFFFF) as u16 as i16;
+    let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16;
+    (x as f32, y as f32)
+}
+
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_MOUSEMOVE => {
-            with_app(|app| app.set_hovered(true));
+            let (x, y) = mouse_pos(lparam);
+            with_app(|app| {
+                app.set_hovered(true);
+                let button = app.button_at(x, y);
+                app.set_hovered_button(button);
+            });
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
-            with_app(|app| app.set_hovered(false));
+            with_app(|app| {
+                app.set_hovered(false);
+                app.set_hovered_button(None);
+            });
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = mouse_pos(lparam);
+            let mut button = None;
+            with_app(|app| button = app.button_at(x, y));
+            if let Some(button) = button {
+                media::press(button);
+            }
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == ANIM_TIMER => {
             with_app(|app| app.tick());
             LRESULT(0)
         }
+        media::WM_MEDIA => {
+            let info = unsafe { media::take(lparam) };
+            with_app(|app| app.set_media(info));
+            LRESULT(0)
+        }
         WM_DPICHANGED | WM_DISPLAYCHANGE => {
             with_app(|app| app.relayout());
             LRESULT(0)
         }
-        // Clic derecho: cerrar (temporal, hasta que tengamos ícono en la bandeja).
-        WM_RBUTTONUP => {
-            unsafe {
-                let _ = DestroyWindow(hwnd);
+        // Clic derecho sobre el ícono de la bandeja: menú. El evento real va en la parte baja de lparam.
+        tray::WM_TRAY => {
+            let event = (lparam.0 & 0xFFFF) as u32;
+            if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
+                match tray::show_menu(hwnd) {
+                    Some(tray::Command::ToggleAutostart) => {
+                        autostart::set(!autostart::is_enabled())
+                    }
+                    Some(tray::Command::Exit) => unsafe {
+                        let _ = DestroyWindow(hwnd);
+                    },
+                    None => {}
+                }
             }
             LRESULT(0)
         }
         // Al hacer clic, no quitarle el foco a la ventana que estás usando.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        fullscreen::WM_APPBAR if wparam.0 == fullscreen::ABN_FULLSCREENAPP => {
+            let active = fullscreen::is_active(hwnd, lparam);
+            with_app(|app| app.set_fullscreen(active));
+            LRESULT(0)
+        }
         WM_DESTROY => {
+            fullscreen::unregister(hwnd);
+            with_app(|app| app.tray.remove());
             unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        // El Explorador se reinició: la bandeja es nueva y hay que volver a poner el ícono.
+        m if tray::is_taskbar_created(m) => {
+            with_app(|app| app.tray.add());
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

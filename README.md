@@ -7,10 +7,10 @@ Objetivo: controlar la música que suena en el PC (Spotify, YouTube, etc.) desde
 
 | Paso | Qué hace | Estado |
 |---|---|---|
-| 1 | Píldora negra arriba al centro que se expande con rebote al pasar el mouse | ✅ |
-| 2 | Leer la canción que suena (título, artista, carátula) vía SMTC | ⏳ |
-| 3 | Controles: play/pausa, siguiente, anterior | ⏳ |
-| 4 | Ícono en la bandeja, inicio con Windows | ⏳ |
+| 1 | Píldora negra arriba al centro que se expande con rebote al pasar el mouse | Hecho |
+| 2 | Leer la canción que suena (título, artista, carátula) vía SMTC | Hecho |
+| 3 | Controles: play/pausa, siguiente, anterior | Hecho |
+| 4 | Ícono en la bandeja, inicio con Windows, una sola instancia, ocultar en pantalla completa y sin música | Hecho |
 
 ## Requisitos
 
@@ -27,7 +27,12 @@ cargo run --release  # versión optimizada, sin consola
 
 El ejecutable final queda en `target\release\notch-isla.exe`.
 
-**Uso (paso 1):** pasa el mouse sobre la píldora para expandirla. **Clic derecho** la cierra.
+**Uso:**
+
+- La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
+- Pasa el mouse sobre la píldora para expandirla: carátula, título, artista y los botones anterior / play-pausa / siguiente.
+- Si el título o el artista no caben, se desplazan de un lado al otro.
+- Clic derecho en el ícono de la bandeja: **Iniciar con Windows** y **Salir**.
 
 ## Cómo está hecha
 
@@ -35,10 +40,19 @@ El ejecutable final queda en `target\release\notch-isla.exe`.
 - Dibujo con [tiny-skia](https://github.com/linebender/tiny-skia) (anti-aliasing, curvas) sobre un mapa de bits en memoria.
 - Animación con un **resorte amortiguado** (`src/spring.rs`). El temporizador de ~60 fps solo existe mientras la isla se mueve: **en reposo, 0 % de CPU**.
 - Consciente del DPI por monitor (nítida con escalado 125 %, 150 %…).
+- **Música por SMTC** (`Windows.Media.Control`) con eventos, sin sondeo. Los eventos llegan en otros hilos y se pasan a la ventana con `PostMessageW`.
+- **Carátula** decodificada con WIC (`Windows.Graphics.Imaging`), recortada al centro.
+- **Texto** con DirectWrite, dibujado por Direct2D en modo software sobre el mismo mapa de bits.
+- **Pantalla completa** detectada registrando la ventana como appbar (`ABN_FULLSCREENAPP`), también sin sondeo.
 
 ```
 src/
-├─ main.rs    ventana, mensajes de Windows, bucle de animación
-├─ island.rs  geometría y dibujo de la isla
-└─ spring.rs  física del resorte
+├─ main.rs        ventana, mensajes de Windows, bucle de animación
+├─ island.rs      geometría y dibujo de la isla, botones e ícono de la bandeja
+├─ spring.rs      física del resorte
+├─ media.rs       música actual vía SMTC, carátula y órdenes de reproducción
+├─ text.rs        título y artista con DirectWrite, desplazamiento de textos largos
+├─ tray.rs        ícono en la bandeja y su menú
+├─ autostart.rs   iniciar con Windows (clave Run del usuario)
+└─ fullscreen.rs  ocultar la isla cuando una app está a pantalla completa
 ```
