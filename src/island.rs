@@ -169,6 +169,7 @@ pub fn draw(
     // Indicador de la isla contraída; se desvanece en cuanto empieza a expandirse.
     let mini = mini_alpha(p);
     if let (Some(c), true) = (&controls, mini > 0.0) {
+        // Mini carátula circular, centrada en el extremo redondo de la píldora.
         let size = 24.0 * s;
         draw_cover(
             pixmap,
@@ -176,7 +177,7 @@ pub fn draw(
             g.x0 + 5.0 * s,
             g.cy() - size / 2.0,
             size,
-            7.0 * s,
+            size / 2.0,
             mini,
         );
         draw_bars(pixmap, &g, s, c, t, mini);
