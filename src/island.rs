@@ -61,7 +61,14 @@ pub fn edge_strip_width(scale: f32) -> f32 {
 /// Línea de tiempo en el borde superior, donde estaba la isla contraída: indica que la isla
 /// sigue ahí y tocarla con el mouse la hace volver (ningún píxel queda con alfa 0, así que
 /// recibe el mouse en todo su ancho). `progress`: avance de la canción, si la app lo informa.
-pub fn draw_edge_strip(pixmap: &mut Pixmap, scale: f32, progress: Option<f32>, accent: [u8; 3]) {
+/// `update`: hay una versión nueva; se marca con el punto azul a la derecha de la línea.
+pub fn draw_edge_strip(
+    pixmap: &mut Pixmap,
+    scale: f32,
+    progress: Option<f32>,
+    accent: [u8; 3],
+    update: bool,
+) {
     let w = edge_strip_width(scale);
     let x = (pixmap.width() as f32 - w) / 2.0;
     let h = (EDGE_STRIP_H * scale).round().max(2.0);
@@ -69,6 +76,12 @@ pub fn draw_edge_strip(pixmap: &mut Pixmap, scale: f32, progress: Option<f32>, a
         anti_alias: true,
         ..Default::default()
     };
+    if update {
+        let r = UPDATE_DOT_R * scale;
+        let [ur, ug, ub] = UPDATE_COLOR;
+        paint.set_color_rgba8(ur, ug, ub, 255);
+        fill_circle(pixmap, &paint, x + w + r + 4.0 * scale, r + 1.0 * scale, r);
+    }
     // Pista oscura semitransparente: se distingue sobre fondos claros y oscuros.
     paint.set_color_rgba8(0, 0, 0, 170);
     fill_rounded_rect(pixmap, &paint, x, 0.0, w, h, h / 2.0);
@@ -104,6 +117,22 @@ pub enum Hit {
     Seek(f32),
     /// Sobre la carátula, con varias apps sonando: un clic pasa a la siguiente.
     Cover,
+    /// Sobre el punto de actualización disponible: un clic la instala.
+    Update,
+}
+
+/// Color del punto de actualización (azul de sistema, se lee sobre el negro de la isla).
+const UPDATE_COLOR: [u8; 3] = [10, 132, 255];
+/// Radio del punto y de la zona que acepta el clic, en píxeles lógicos.
+const UPDATE_DOT_R: f32 = 3.5;
+const UPDATE_HIT_R: f32 = 9.0;
+
+/// Centro del punto de actualización: en la isla expandida, dentro de la esquina superior
+/// derecha; en la contraída, montado sobre esa esquina como la marca de una notificación.
+fn update_dot(g: &Geometry, p: f32) -> (f32, f32) {
+    let s = g.scale;
+    let lerp = |a: f32, b: f32| a + (b - a) * p.clamp(0.0, 1.0);
+    (g.x1() - lerp(9.0, 13.0) * s, g.y0 + lerp(4.0, 11.0) * s)
 }
 
 /// Estado de la reproducción; `None` en `draw` = no hay música (sin botones ni indicador).
@@ -126,6 +155,10 @@ pub struct Controls {
     pub cover_hovered: bool,
     /// Botón recién pulsado y avance de su animación (0 a 1).
     pub pressed: Option<(Button, f32)>,
+    /// Hay una versión nueva: se dibuja el punto azul.
+    pub update: bool,
+    /// El mouse está sobre el punto de actualización (se agranda un poco).
+    pub update_hovered: bool,
 }
 
 /// Duración de la animación al pulsar un botón.
@@ -246,7 +279,8 @@ fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 3] {
 }
 
 /// Qué hay bajo el punto (x, y) de la ventana, solo si el contenido ya se ve por completo.
-/// `seekable` = la barra de progreso está visible; `switchable` = hay otra app a la que cambiar.
+/// `seekable` = la barra de progreso está visible; `switchable` = hay otra app a la que cambiar;
+/// `updatable` = se muestra el punto de actualización.
 #[allow(clippy::too_many_arguments)]
 pub fn hit_test(
     max_w: f32,
@@ -256,12 +290,20 @@ pub fn hit_test(
     presence: f32,
     seekable: bool,
     switchable: bool,
+    updatable: bool,
     x: f32,
     y: f32,
 ) -> Option<Hit> {
     let g = geometry(max_w, max_h, scale, p, presence);
     if g.alpha < 1.0 {
         return None;
+    }
+    if updatable {
+        let (dx, dy) = update_dot(&g, p);
+        let r = UPDATE_HIT_R * scale;
+        if (x - dx).powi(2) + (y - dy).powi(2) <= r * r {
+            return Some(Hit::Update);
+        }
     }
     if switchable {
         let (cx, cy, size) = g.cover_rect();
@@ -316,6 +358,17 @@ pub fn draw(
     // Cuerpo: píldora negra flotante, con las cuatro esquinas redondeadas.
     paint.set_color_rgba8(0, 0, 0, 255);
     fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
+
+    // Actualización disponible: punto azul con un aro negro (sobre el borde, en la contraída).
+    if let Some(c) = controls.as_ref().filter(|c| c.update) {
+        let (dx, dy) = update_dot(&g, p);
+        let r = UPDATE_DOT_R * s * if c.update_hovered { 1.35 } else { 1.0 };
+        paint.set_color_rgba8(0, 0, 0, 255);
+        fill_circle(pixmap, &paint, dx, dy, r + 1.5 * s);
+        let [ur, ug, ub] = UPDATE_COLOR;
+        paint.set_color_rgba8(ur, ug, ub, 255);
+        fill_circle(pixmap, &paint, dx, dy, r);
+    }
 
     // Indicador de la isla contraída; se desvanece en cuanto empieza a expandirse.
     let mini = mini_alpha(p);

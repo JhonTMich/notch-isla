@@ -2,7 +2,7 @@
 //! el instalador para instalarlo con un clic.
 //!
 //! Corre en un hilo aparte que pasa casi todo el tiempo dormido (0 % de CPU): revisa al minuto
-//! de abrir la app y luego una vez al día. No envía ningún dato: son GET sin cookies ni
+//! de abrir la app y luego cada 6 horas. No envía ningún dato: son GET sin cookies ni
 //! identificadores. El instalador se verifica (tamaño y SHA-256 publicados por GitHub) antes de
 //! ofrecerlo. Si la app es la versión portable (no instalada), solo se avisa y se abre la página.
 
@@ -43,7 +43,8 @@ const UNINSTALL_KEY: PCWSTR = w!(
 /// Espera antes de la primera consulta, para no competir con el arranque de Windows.
 /// En debug son 5 s, para probar el aviso sin esperar.
 const FIRST_CHECK: Duration = Duration::from_secs(if cfg!(debug_assertions) { 5 } else { 60 });
-const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// Cada cuánto se vuelve a consultar: la app suele pasar días abierta.
+const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Versión nueva disponible.
 #[derive(Clone)]

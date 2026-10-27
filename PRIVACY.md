@@ -6,7 +6,7 @@
 
 Notch Isla **no recopila, no guarda y no envía ningún dato personal**. No tiene telemetría, estadísticas de uso, anuncios ni cuentas.
 
-La única conexión a internet es la de **actualizaciones**: un minuto después de abrirse y luego una vez al día, la app pide a GitHub (`api.github.com`) el número de la última versión publicada. Si hay una versión nueva y la app está instalada, descarga su instalador desde `github.com` a la carpeta temporal; solo se instala si haces clic en el aviso. Las peticiones no llevan datos tuyos, solo el nombre y la versión de la app. Como cualquier conexión, GitHub ve tu dirección IP; se aplica la [declaración de privacidad de GitHub](https://docs.github.com/es/site-policy/privacy-policies/github-general-privacy-statement).
+La única conexión a internet es la de **actualizaciones**: un minuto después de abrirse y luego cada 6 horas, la app pide a GitHub (`api.github.com`) el número de la última versión publicada. Si hay una versión nueva y la app está instalada, descarga su instalador desde `github.com` a la carpeta temporal; solo se instala si haces clic en el aviso. Las peticiones no llevan datos tuyos, solo el nombre y la versión de la app. Como cualquier conexión, GitHub ve tu dirección IP; se aplica la [declaración de privacidad de GitHub](https://docs.github.com/es/site-policy/privacy-policies/github-general-privacy-statement).
 
 Para funcionar, la app usa información que ya está en tu PC, solo en memoria y mientras está abierta:
 
@@ -24,7 +24,7 @@ Preguntas: abre un *issue* en https://github.com/gportal21/notch-isla/issues
 
 Notch Isla **does not collect, store, or send any personal data**. It has no telemetry, usage statistics, ads, or accounts.
 
-Its only internet connection is for **updates**: one minute after it starts and then once a day, the app asks GitHub (`api.github.com`) for the number of the latest published version. If there is a new version and the app is installed, it downloads the installer from `github.com` to the temporary folder; it is installed only if you click the notification. The requests carry none of your data, only the app's name and version. As with any connection, GitHub sees your IP address; the [GitHub General Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) applies.
+Its only internet connection is for **updates**: one minute after it starts and then every 6 hours, the app asks GitHub (`api.github.com`) for the number of the latest published version. If there is a new version and the app is installed, it downloads the installer from `github.com` to the temporary folder; it is installed only if you click the notification. The requests carry none of your data, only the app's name and version. As with any connection, GitHub sees your IP address; the [GitHub General Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) applies.
 
 To work, the app uses information already on your PC, only in memory and only while it is running:
 

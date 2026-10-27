@@ -191,6 +191,8 @@ struct App {
     seek_hovered: bool,
     /// El mouse está sobre la carátula y se puede cambiar de app.
     cover_hovered: bool,
+    /// El mouse está sobre el punto de actualización.
+    update_hovered: bool,
     tray: Tray,
     /// Inicio del desplazamiento de textos largos; se reinicia al expandir o cambiar de canción.
     scroll_start: Instant,
@@ -235,6 +237,7 @@ impl App {
             hovered_button: None,
             seek_hovered: false,
             cover_hovered: false,
+            update_hovered: false,
             tray: Tray::new(hwnd),
             scroll_start: Instant::now(),
             fullscreen: false,
@@ -389,6 +392,7 @@ impl App {
             self.hovered_button = None;
             self.seek_hovered = false;
             self.cover_hovered = false;
+            self.update_hovered = false;
             self.spring.set_target(0.0);
         }
         self.start_animation();
@@ -414,6 +418,7 @@ impl App {
             // Mientras se muestra el volumen, la barra no sirve para saltar.
             media.timeline.is_some() && !self.volume_showing(),
             media.sessions.1 > 1,
+            self.update.is_some(),
             x,
             y,
         )
@@ -426,13 +431,18 @@ impl App {
         };
         let seek = matches!(hit, Some(Hit::Seek(_)));
         let cover = hit == Some(Hit::Cover);
-        if self.hovered_button == button && self.seek_hovered == seek && self.cover_hovered == cover
+        let update = hit == Some(Hit::Update);
+        if self.hovered_button == button
+            && self.seek_hovered == seek
+            && self.cover_hovered == cover
+            && self.update_hovered == update
         {
             return;
         }
         self.hovered_button = button;
         self.seek_hovered = seek;
         self.cover_hovered = cover;
+        self.update_hovered = update;
         self.redraw();
     }
 
@@ -559,6 +569,8 @@ impl App {
             volume,
             sessions: m.sessions,
             cover_hovered: self.cover_hovered,
+            update: self.update.is_some(),
+            update_hovered: self.update_hovered,
         });
         let playing = self.visible && self.media.as_ref().is_some_and(|m| m.playing);
         let bars = playing && island::mini_alpha(self.spring.value) > 0.0;
@@ -585,7 +597,13 @@ impl App {
         if let (true, Some(m)) = (strip, self.media.as_ref()) {
             let accent = m.cover.as_ref().map_or([255, 255, 255], |c| c.accent);
             let progress = m.timeline.map(|t| t.progress(m.playing));
-            island::draw_edge_strip(&mut self.surface.pixmap, self.scale, progress, accent);
+            island::draw_edge_strip(
+                &mut self.surface.pixmap,
+                self.scale,
+                progress,
+                accent,
+                self.update.is_some(),
+            );
             // Se redibuja solo cuando la línea crece un píxel (en pausa, nunca).
             if let (true, Some(t)) = (m.playing, m.timeline) {
                 let px = island::edge_strip_width(self.scale).max(1.0);
@@ -606,6 +624,9 @@ impl App {
                     let mut subtitle = m.artist.clone();
                     if let Some(level) = volume {
                         subtitle = format!("Volumen {} %", (level * 100.0).round() as u32);
+                    } else if let (true, Some(u)) = (self.update_hovered, &self.update) {
+                        // Explica qué hace el punto azul antes de hacer clic.
+                        subtitle = u.menu_label();
                     } else if !m.playing {
                         if !subtitle.is_empty() {
                             subtitle.push_str(" · ");
@@ -841,12 +862,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_LBUTTONUP => {
             let (x, y) = mouse_pos(lparam);
+            // La actualización se aplica fuera de `with_app`: puede cerrar la ventana, y su
+            // WM_DESTROY necesita el estado de la app libre.
+            let mut pending = None;
             with_app(|app| match app.hit_at(x, y) {
                 Some(Hit::Button(button)) => app.press(button),
                 Some(Hit::Seek(fraction)) => app.seek(fraction),
                 Some(Hit::Cover) => media::next_session(),
+                Some(Hit::Update) => pending = app.update.clone(),
                 None => {}
             });
+            if pending.is_some() {
+                apply_update(hwnd, pending.as_ref());
+            }
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == ANIM_TIMER => {
@@ -882,6 +910,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     );
                 }
                 app.update = Some(found);
+                // Aparece el punto azul en la isla.
+                app.redraw();
             });
             LRESULT(0)
         }
