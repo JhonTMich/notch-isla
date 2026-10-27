@@ -9,8 +9,10 @@ use tiny_skia::{
 };
 
 /// (ancho, alto, radio de las esquinas)
-const COLLAPSED: (f32, f32, f32) = (190.0, 34.0, 17.0);
-const EXPANDED: (f32, f32, f32) = (360.0, 68.0, 22.0);
+/// Contraída mide lo justo para la mini carátula (5 + 24 px) y las barras de audio (19,5 +
+/// 14 px), con un respiro entre ambas.
+const COLLAPSED: (f32, f32, f32) = (82.0, 34.0, 17.0);
+const EXPANDED: (f32, f32, f32) = (252.0, 68.0, 22.0);
 
 /// Alto lógico de la fila de contenido (carátula, textos, botones); debajo va la barra de progreso.
 const ROW_H: f32 = 56.0;
