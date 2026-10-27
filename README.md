@@ -27,6 +27,19 @@ cargo run --release  # versión optimizada, sin consola
 
 El ejecutable final queda en `target\release\notch-isla.exe`.
 
+### Instalador
+
+`installer\build.ps1` compila la app y genera `target\installer\notch-isla-setup-<versión>.exe` con [Inno Setup 6](https://jrsoftware.org/isinfo.php) (la versión sale de `Cargo.toml`):
+
+```powershell
+winget install --id JRSoftware.InnoSetup -e --scope user   # una sola vez
+.\installer\build.ps1
+```
+
+El instalador no pide permisos de administrador: instala en `%LOCALAPPDATA%\Programs\Notch Isla`, crea el acceso del menú Inicio (y del escritorio, si se elige), ofrece **Iniciar con Windows** y queda en *Aplicaciones instaladas* con su desinstalador, que cierra la isla y quita el inicio automático.
+
+### Ícono
+
 El ícono (`assets/icon.ico`) se dibuja por código y se incrusta en el `.exe` al compilar (`build.rs` + `app.rc`, con el `rc.exe` del Windows SDK). Para regenerarlo después de cambiar el diseño en `examples/icon.rs`:
 
 ```powershell

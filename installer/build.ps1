@@ -1,0 +1,24 @@
+# Compila la app en modo release y genera el instalador en target\installer.
+# Uso (desde cualquier carpeta):  .\installer\build.ps1
+# Requiere Inno Setup 6:          winget install --id JRSoftware.InnoSetup -e --scope user
+
+$ErrorActionPreference = 'Stop'
+Set-Location (Split-Path $PSScriptRoot)
+
+# La versión sale de Cargo.toml, para que app e instalador nunca difieran.
+$version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+
+cargo build --release
+if ($LASTEXITCODE -ne 0) { throw "cargo build falló" }
+
+$iscc = @(
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+    "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc) { throw "No se encontró Inno Setup 6 (ISCC.exe)" }
+
+& $iscc /Q "/DAppVersion=$version" installer\notch-isla.iss
+if ($LASTEXITCODE -ne 0) { throw "ISCC falló" }
+
+Write-Host "Instalador: target\installer\notch-isla-setup-$version.exe"
