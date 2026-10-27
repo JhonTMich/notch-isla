@@ -30,7 +30,8 @@ El ejecutable final queda en `target\release\notch-isla.exe`.
 **Uso:**
 
 - La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
-- Pasa el mouse sobre la píldora para expandirla: carátula, título, artista y los botones anterior / play-pausa / siguiente.
+- Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que se mueven mientras suena la música.
+- Pasa el mouse sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
 - Clic derecho en el ícono de la bandeja: **Iniciar con Windows** y **Salir**.
 

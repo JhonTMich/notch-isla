@@ -40,12 +40,37 @@ pub struct NowPlaying {
 /// Carátula cuadrada en RGBA premultiplicado (el formato de tiny-skia).
 /// Se compara por identidad: cada decodificación produce una carátula distinta.
 #[derive(Clone)]
-pub struct Cover(pub Arc<Pixmap>);
+pub struct Cover {
+    pub image: Arc<Pixmap>,
+    /// Color dominante aclarado, para teñir las barras de audio de la isla contraída.
+    pub accent: [u8; 3],
+}
 
 impl PartialEq for Cover {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.image, &other.image)
     }
+}
+
+/// Promedio de color de la carátula, aclarado para que se lea sobre el negro de la isla.
+fn accent_of(pixmap: &Pixmap) -> [u8; 3] {
+    let mut sum = [0u64; 3];
+    let mut count = 0u64;
+    // Una muestra de cada 4 píxeles basta para un promedio.
+    for px in pixmap.pixels().iter().step_by(4) {
+        let c = px.demultiply();
+        sum[0] += c.red() as u64;
+        sum[1] += c.green() as u64;
+        sum[2] += c.blue() as u64;
+        count += 1;
+    }
+    let avg = sum.map(|v| (v / count.max(1)) as f32);
+    // Lleva el canal más alto a ~230 (conserva el tono) y lo mezcla un poco con blanco.
+    let max = avg.iter().cloned().fold(1.0, f32::max);
+    avg.map(|v| {
+        let lifted = v * (230.0 / max);
+        (lifted * 0.75 + 255.0 * 0.25) as u8
+    })
 }
 
 struct Watcher {
@@ -208,7 +233,10 @@ fn read_cover(props: &Properties) -> Result<Cover> {
 
     let size = IntSize::from_wh(COVER_PX, COVER_PX).ok_or_else(|| Error::from(E_FAIL))?;
     let pixmap = Pixmap::from_vec(pixels.to_vec(), size).ok_or_else(|| Error::from(E_FAIL))?;
-    Ok(Cover(Arc::new(pixmap)))
+    Ok(Cover {
+        accent: accent_of(&pixmap),
+        image: Arc::new(pixmap),
+    })
 }
 
 fn post(hwnd: isize, info: Option<NowPlaying>) {

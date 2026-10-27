@@ -72,8 +72,8 @@ impl TextRenderer {
             target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let title = make_format(&dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 15.0 * scale)?;
-            let subtitle = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, 13.0 * scale)?;
+            let title = make_format(&dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 14.0 * scale)?;
+            let subtitle = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, 12.0 * scale)?;
             Ok(Self {
                 dwrite,
                 target,
@@ -91,8 +91,8 @@ impl TextRenderer {
         if scale == self.scale {
             return;
         }
-        let title = make_format(&self.dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 15.0 * scale);
-        let subtitle = make_format(&self.dwrite, DWRITE_FONT_WEIGHT_REGULAR, 13.0 * scale);
+        let title = make_format(&self.dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 14.0 * scale);
+        let subtitle = make_format(&self.dwrite, DWRITE_FONT_WEIGHT_REGULAR, 12.0 * scale);
         if let (Ok(title), Ok(subtitle)) = (title, subtitle) {
             self.title = title;
             self.subtitle = subtitle;
@@ -142,8 +142,8 @@ impl TextRenderer {
                     &self.target,
                     line,
                     area,
-                    28.0 * s,
-                    22.0 * s,
+                    area.cy - 19.0 * s,
+                    20.0 * s,
                     (1.0, 1.0, 1.0),
                     s,
                     t,
@@ -154,8 +154,8 @@ impl TextRenderer {
                     &self.target,
                     line,
                     area,
-                    51.0 * s,
-                    20.0 * s,
+                    area.cy + 1.0 * s,
+                    18.0 * s,
                     (0.63, 0.63, 0.66),
                     s,
                     t,

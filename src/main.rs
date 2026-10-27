@@ -50,6 +50,16 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const ANIM_TIMER: usize = 1;
 /// ~60 fps. El temporizador solo existe mientras hay animación: en reposo la CPU queda en 0%.
 const FRAME_MS: u32 = 15;
+/// ~30 fps para las barras de audio de la isla contraída: se ven fluidas y cuestan la mitad.
+const BARS_MS: u32 = 33;
+
+/// Qué sigue moviéndose después de dibujar un cuadro.
+struct Motion {
+    /// Un texto largo se desplaza (isla expandida).
+    scrolling: bool,
+    /// Las barras de audio bailan (isla contraída y música sonando).
+    bars: bool,
+}
 
 fn main() -> Result<()> {
     unsafe {
@@ -140,8 +150,11 @@ struct App {
     scale: f32,
     spring: Spring,
     hovered: bool,
-    timer_on: bool,
+    /// Intervalo del temporizador de animación, o `None` si está apagado (reposo).
+    timer_ms: Option<u32>,
     last_tick: Instant,
+    /// Reloj de las barras de audio.
+    started: Instant,
     /// Si DirectWrite fallara, la isla sigue funcionando sin texto.
     text: Option<TextRenderer>,
     media: Option<NowPlaying>,
@@ -165,8 +178,9 @@ impl App {
             scale,
             spring: Spring::new(0.0, 260.0, 22.0),
             hovered: false,
-            timer_on: false,
+            timer_ms: None,
             last_tick: Instant::now(),
+            started: Instant::now(),
             text: TextRenderer::new(scale).ok(),
             media: None,
             hovered_button: None,
@@ -177,11 +191,35 @@ impl App {
         })
     }
 
-    /// Redibuja fuera de la animación; si un texto quedó desplazándose, arranca el temporizador.
+    /// Redibuja fuera de la animación; si algo quedó moviéndose, arranca el temporizador.
+    /// Si ya está corriendo, `tick` ajusta el intervalo en el siguiente cuadro.
     fn redraw(&mut self) {
-        if !self.timer_on && self.render() {
-            self.start_animation();
+        let motion = self.render();
+        if self.timer_ms.is_none() {
+            self.set_timer(timer_for(&motion, false));
         }
+    }
+
+    /// Enciende, cambia de intervalo o apaga el temporizador de animación.
+    fn set_timer(&mut self, ms: Option<u32>) {
+        if self.timer_ms == ms {
+            return;
+        }
+        unsafe {
+            match ms {
+                Some(ms) => {
+                    if self.timer_ms.is_none() {
+                        self.last_tick = Instant::now();
+                    }
+                    // Con el mismo id, SetTimer reemplaza el intervalo del temporizador existente.
+                    SetTimer(Some(self.hwnd), ANIM_TIMER, ms, None);
+                }
+                None => {
+                    let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
+                }
+            }
+        }
+        self.timer_ms = ms;
     }
 
     /// La isla se muestra solo si hay música y nada está a pantalla completa.
@@ -200,10 +238,7 @@ impl App {
                 self.hovered = false;
                 self.hovered_button = None;
                 self.spring.snap(0.0);
-                if self.timer_on {
-                    let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
-                    self.timer_on = false;
-                }
+                self.set_timer(None);
                 self.render();
             }
         }
@@ -276,13 +311,7 @@ impl App {
     }
 
     fn start_animation(&mut self) {
-        if !self.timer_on {
-            self.last_tick = Instant::now();
-            unsafe {
-                SetTimer(Some(self.hwnd), ANIM_TIMER, FRAME_MS, None);
-            }
-            self.timer_on = true;
-        }
+        self.set_timer(Some(FRAME_MS));
     }
 
     fn tick(&mut self) {
@@ -291,15 +320,10 @@ impl App {
         self.last_tick = now;
 
         let moving = self.spring.step(dt);
-        let scrolling = self.render();
+        let motion = self.render();
 
-        // El temporizador sigue solo mientras algo se mueve: la isla o un texto largo.
-        if !moving && !scrolling {
-            unsafe {
-                let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
-            }
-            self.timer_on = false;
-        }
+        // El temporizador sigue solo mientras algo se mueve, y al ritmo que eso necesita.
+        self.set_timer(timer_for(&motion, moving));
     }
 
     /// Recalcula tamaño y posición (cambio de DPI o de resolución).
@@ -316,21 +340,24 @@ impl App {
         }
     }
 
-    /// Dibuja el cuadro actual. Devuelve `true` si algún texto se está desplazando.
-    fn render(&mut self) -> bool {
+    /// Dibuja el cuadro actual y dice qué sigue moviéndose.
+    fn render(&mut self) -> Motion {
+        let cover = self.media.as_ref().and_then(|m| m.cover.as_ref());
         let controls = self.media.as_ref().map(|m| Controls {
             playing: m.playing,
             hovered: self.hovered_button,
+            accent: cover.map_or([255, 255, 255], |c| c.accent),
         });
+        let bars = self.visible
+            && self.media.as_ref().is_some_and(|m| m.playing)
+            && island::mini_alpha(self.spring.value) > 0.0;
         let area = island::draw(
             &mut self.surface.pixmap,
             self.scale,
             self.spring.value,
             controls,
-            self.media
-                .as_ref()
-                .and_then(|m| m.cover.as_ref())
-                .map(|c| c.0.as_ref()),
+            cover.map(|c| c.image.as_ref()),
+            self.started.elapsed().as_secs_f32(),
         );
         self.surface.copy_to_dib();
         let mut scrolling = false;
@@ -392,7 +419,19 @@ impl App {
                 ULW_ALPHA,
             );
         }
-        scrolling
+        Motion { scrolling, bars }
+    }
+}
+
+/// Intervalo del temporizador según lo que se mueve: 60 fps para la isla y los textos,
+/// 30 fps si solo bailan las barras, y apagado si todo está quieto.
+fn timer_for(motion: &Motion, moving: bool) -> Option<u32> {
+    if moving || motion.scrolling {
+        Some(FRAME_MS)
+    } else if motion.bars {
+        Some(BARS_MS)
+    } else {
+        None
     }
 }
 

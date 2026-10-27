@@ -1,22 +1,41 @@
 //! Geometría y dibujo de la isla. Todo en píxeles lógicos; `scale` convierte según el DPI.
+//!
+//! La isla es una píldora flotante: separada del borde superior y con las cuatro esquinas
+//! redondeadas. Contraída muestra una mini carátula y barras de audio; expandida, una sola
+//! fila con carátula, título y artista, y los controles.
 
 use tiny_skia::{
     FillRule, FilterQuality, Paint, Path, PathBuilder, Pattern, Pixmap, SpreadMode, Transform,
 };
 
-/// (ancho, alto, radio de las esquinas inferiores)
-const COLLAPSED: (f32, f32, f32) = (190.0, 34.0, 14.0);
-const EXPANDED: (f32, f32, f32) = (360.0, 100.0, 28.0);
+/// (ancho, alto, radio de las esquinas)
+const COLLAPSED: (f32, f32, f32) = (190.0, 34.0, 17.0);
+const EXPANDED: (f32, f32, f32) = (360.0, 56.0, 20.0);
+
+/// Separación lógica entre el borde superior de la pantalla y la isla.
+const TOP_GAP: f32 = 8.0;
 
 /// Margen para que el rebote (overshoot) no se recorte en el borde de la ventana.
 const OVERSHOOT: f32 = 1.08;
 
 /// Radio lógico de la zona de clic (y del resaltado) de cada botón.
-const BUTTON_RADIUS: f32 = 17.0;
+const BUTTON_RADIUS: f32 = 16.0;
+/// Radio lógico del círculo blanco del botón play/pausa.
+const PLAY_RADIUS: f32 = 15.0;
+/// Distancia lógica entre centros de botones.
+const BUTTON_GAP: f32 = 34.0;
+/// Centro del botón "siguiente" medido desde el borde derecho de la isla.
+const LAST_BUTTON_INSET: f32 = 24.0;
 
-/// Tamaño lógico de la ventana: cabe la isla expandida más el rebote.
+/// Carátula de la isla expandida: (margen izquierdo, lado, radio).
+const COVER: (f32, f32, f32) = (9.0, 38.0, 9.0);
+
+/// Tamaño lógico de la ventana: cabe la isla expandida más el rebote y la separación superior.
 pub fn window_size() -> (f32, f32) {
-    (EXPANDED.0 * OVERSHOOT + 8.0, EXPANDED.1 * OVERSHOOT + 8.0)
+    (
+        EXPANDED.0 * OVERSHOOT + 8.0,
+        TOP_GAP + EXPANDED.1 * OVERSHOOT + 8.0,
+    )
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -26,22 +45,35 @@ pub enum Button {
     Next,
 }
 
-/// Estado de los botones de reproducción; `None` en `draw` = no hay música, no se dibujan.
+/// Estado de la reproducción; `None` en `draw` = no hay música (sin botones ni indicador).
 pub struct Controls {
     pub playing: bool,
     pub hovered: Option<Button>,
+    /// Color de las barras de audio (tomado de la carátula).
+    pub accent: [u8; 3],
 }
 
-/// Zona horizontal (píxeles físicos) donde van título y artista, y su opacidad.
+/// Hasta qué progreso de expansión se ve el indicador de la isla contraída.
+const MINI_FADE: f32 = 0.35;
+
+/// Opacidad del indicador (mini carátula y barras) para un progreso dado.
+pub fn mini_alpha(p: f32) -> f32 {
+    (1.0 - p.max(0.0) / MINI_FADE).clamp(0.0, 1.0)
+}
+
+/// Dónde van título y artista (píxeles físicos): columna horizontal, centro vertical de la
+/// fila y opacidad.
 pub struct TextArea {
     pub x: f32,
     pub w: f32,
+    pub cy: f32,
     pub alpha: f32,
 }
 
 /// Forma de la isla para un progreso dado, en píxeles físicos.
 struct Geometry {
     x0: f32,
+    y0: f32,
     w: f32,
     h: f32,
     r: f32,
@@ -49,37 +81,45 @@ struct Geometry {
     alpha: f32,
 }
 
+impl Geometry {
+    /// Centro vertical de la isla: ahí se alinea todo el contenido.
+    fn cy(&self) -> f32 {
+        self.y0 + self.h / 2.0
+    }
+
+    fn x1(&self) -> f32 {
+        self.x0 + self.w
+    }
+}
+
 fn geometry(max_w: f32, max_h: f32, scale: f32, p: f32) -> Geometry {
     let p = p.clamp(-0.1, 1.1);
     let lerp = |a: f32, b: f32| a + (b - a) * p;
+    let y0 = TOP_GAP * scale;
     let w = (lerp(COLLAPSED.0, EXPANDED.0) * scale).clamp(1.0, max_w);
-    let h = (lerp(COLLAPSED.1, EXPANDED.1) * scale).clamp(1.0, max_h);
+    let h = (lerp(COLLAPSED.1, EXPANDED.1) * scale).clamp(1.0, max_h - y0);
     Geometry {
         x0: (max_w - w) / 2.0,
+        y0,
         w,
         h,
-        r: (lerp(COLLAPSED.2, EXPANDED.2) * scale).clamp(0.0, (w / 2.0).min(h)),
+        r: (lerp(COLLAPSED.2, EXPANDED.2) * scale).clamp(0.0, (w / 2.0).min(h / 2.0)),
         alpha: ((p - 0.55) / 0.45).clamp(0.0, 1.0),
     }
 }
 
-/// Distancia lógica entre centros de botones.
-const BUTTON_GAP: f32 = 38.0;
-/// Centro del botón "siguiente" medido desde el borde derecho de la isla.
-const LAST_BUTTON_INSET: f32 = 37.0;
-
 /// Columna entre la carátula y los botones: (x, ancho). El texto nunca pasa de aquí.
 fn text_column(g: &Geometry, s: f32) -> (f32, f32) {
-    let x = g.x0 + (20.0 + 56.0 + 16.0) * s;
-    // Borde izquierdo del primer botón y un respiro de 8 px.
-    let right = g.x0 + g.w - (LAST_BUTTON_INSET + 2.0 * BUTTON_GAP + BUTTON_RADIUS + 8.0) * s;
+    let x = g.x0 + (COVER.0 + COVER.1 + 10.0) * s;
+    // Borde izquierdo del primer botón y un respiro de 6 px.
+    let right = g.x1() - (LAST_BUTTON_INSET + 2.0 * BUTTON_GAP + BUTTON_RADIUS + 6.0) * s;
     (x, (right - x).max(0.0))
 }
 
-/// Centros de los botones: una fila a la derecha, a la altura del centro de la carátula.
+/// Centros de los botones: a la derecha, en la misma fila que la carátula y el texto.
 fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 3] {
-    let next = g.x0 + g.w - LAST_BUTTON_INSET * s;
-    let cy = 50.0 * s;
+    let next = g.x1() - LAST_BUTTON_INSET * s;
+    let cy = g.cy();
     let gap = BUTTON_GAP * s;
     [
         (Button::Prev, next - 2.0 * gap, cy),
@@ -102,6 +142,7 @@ pub fn hit_test(max_w: f32, max_h: f32, scale: f32, p: f32, x: f32, y: f32) -> O
 }
 
 /// Dibuja la isla con progreso `p` (0 = contraída, 1 = expandida; puede pasarse un poco por el rebote).
+/// `t` = segundos, para animar las barras de audio.
 /// Devuelve dónde dibujar el texto, o `None` si el contenido aún no se ve.
 pub fn draw(
     pixmap: &mut Pixmap,
@@ -109,90 +150,56 @@ pub fn draw(
     p: f32,
     controls: Option<Controls>,
     cover: Option<&Pixmap>,
+    t: f32,
 ) -> Option<TextArea> {
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
 
     let g = geometry(pixmap.width() as f32, pixmap.height() as f32, scale, p);
+    let s = scale;
 
     let mut paint = Paint {
         anti_alias: true,
         ..Default::default()
     };
 
-    // Cuerpo de la isla: borde superior recto (pegado al tope de la pantalla), esquinas inferiores redondeadas.
+    // Cuerpo: píldora negra flotante, con las cuatro esquinas redondeadas.
     paint.set_color_rgba8(0, 0, 0, 255);
-    if let Some(path) = notch_path(g.x0, g.w, g.h, g.r) {
-        pixmap.fill_path(
-            &path,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
+    fill_rounded_rect(pixmap, &paint, g.x0, g.y0, g.w, g.h, g.r);
+
+    // Indicador de la isla contraída; se desvanece en cuanto empieza a expandirse.
+    let mini = mini_alpha(p);
+    if let (Some(c), true) = (&controls, mini > 0.0) {
+        let size = 24.0 * s;
+        draw_cover(
+            pixmap,
+            cover,
+            g.x0 + 5.0 * s,
+            g.cy() - size / 2.0,
+            size,
+            7.0 * s,
+            mini,
         );
+        draw_bars(pixmap, &g, s, c, t, mini);
     }
 
     if g.alpha <= 0.0 {
         return None;
     }
-    let s = scale;
-    let a = (g.alpha * 255.0) as u8;
 
-    // Carátula con esquinas redondeadas; sin imagen, un marcador gris.
-    let (cover_x, cover_y, cover_size) = (g.x0 + 20.0 * s, 22.0 * s, 56.0 * s);
-    match cover {
-        Some(img) => {
-            let k = cover_size / img.width() as f32;
-            let image_paint = Paint {
-                shader: Pattern::new(
-                    img.as_ref(),
-                    SpreadMode::Pad,
-                    FilterQuality::Bicubic,
-                    g.alpha,
-                    Transform::from_scale(k, k).post_translate(cover_x, cover_y),
-                ),
-                anti_alias: true,
-                ..Default::default()
-            };
-            fill_rounded_rect(
-                pixmap,
-                &image_paint,
-                cover_x,
-                cover_y,
-                cover_size,
-                cover_size,
-                12.0 * s,
-            );
-        }
-        None => {
-            paint.set_color_rgba8(48, 48, 52, a);
-            fill_rounded_rect(
-                pixmap,
-                &paint,
-                cover_x,
-                cover_y,
-                cover_size,
-                cover_size,
-                12.0 * s,
-            );
-        }
-    }
+    let size = COVER.1 * s;
+    draw_cover(
+        pixmap,
+        cover,
+        g.x0 + COVER.0 * s,
+        g.cy() - size / 2.0,
+        size,
+        COVER.2 * s,
+        g.alpha,
+    );
 
     if let Some(c) = controls {
         for (button, cx, cy) in button_centers(&g, s) {
-            if c.hovered == Some(button) {
-                paint.set_color_rgba8(255, 255, 255, (g.alpha * 28.0) as u8);
-                if let Some(circle) = PathBuilder::from_circle(cx, cy, BUTTON_RADIUS * s) {
-                    pixmap.fill_path(
-                        &circle,
-                        &paint,
-                        FillRule::Winding,
-                        Transform::identity(),
-                        None,
-                    );
-                }
-            }
-            paint.set_color_rgba8(255, 255, 255, a);
-            draw_icon(pixmap, &paint, button, c.playing, cx, cy, s);
+            draw_button(pixmap, button, &c, cx, cy, s, g.alpha);
         }
     }
 
@@ -201,54 +208,168 @@ pub fn draw(
     (text_w > 0.0).then_some(TextArea {
         x: text_x,
         w: text_w,
+        cy: g.cy(),
         alpha: g.alpha,
     })
 }
 
-fn draw_icon(
+/// Carátula con esquinas redondeadas; sin imagen, un marcador gris.
+fn draw_cover(
     pixmap: &mut Pixmap,
-    paint: &Paint,
+    cover: Option<&Pixmap>,
+    x: f32,
+    y: f32,
+    size: f32,
+    radius: f32,
+    alpha: f32,
+) {
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    match cover {
+        Some(img) => {
+            let k = size / img.width() as f32;
+            paint.shader = Pattern::new(
+                img.as_ref(),
+                SpreadMode::Pad,
+                FilterQuality::Bicubic,
+                alpha,
+                Transform::from_scale(k, k).post_translate(x, y),
+            );
+        }
+        None => paint.set_color_rgba8(48, 48, 52, (alpha * 255.0) as u8),
+    }
+    fill_rounded_rect(pixmap, &paint, x, y, size, size, radius);
+}
+
+/// Velocidades (rad/s) de las dos ondas que mueven cada barra; distintas para que no vayan al compás.
+const BAR_SPEEDS: [(f32, f32); 4] = [(7.1, 3.3), (9.3, 4.7), (6.2, 5.9), (8.4, 2.8)];
+
+/// Barras de audio a la derecha de la isla contraída. En pausa quedan quietas y bajas.
+fn draw_bars(pixmap: &mut Pixmap, g: &Geometry, s: f32, c: &Controls, t: f32, alpha: f32) {
+    let (bar_w, gap) = (3.0 * s, 2.5 * s);
+    let (min_h, max_h) = (3.0 * s, 14.0 * s);
+    let n = BAR_SPEEDS.len() as f32;
+    let left = g.x1() - 14.0 * s - (n * bar_w + (n - 1.0) * gap);
+    let cy = g.cy();
+
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    let [r, gr, b] = c.accent;
+    paint.set_color_rgba8(r, gr, b, (alpha * 255.0) as u8);
+
+    for (i, &(w1, w2)) in BAR_SPEEDS.iter().enumerate() {
+        let level = if c.playing {
+            let k = i as f32;
+            (0.5 + 0.3 * (t * w1 + k).sin() + 0.2 * (t * w2 + 2.0 * k).sin()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let h = min_h + (max_h - min_h) * level;
+        let x = left + i as f32 * (bar_w + gap);
+        fill_rounded_rect(pixmap, &paint, x, cy - h / 2.0, bar_w, h, bar_w / 2.0);
+    }
+}
+
+/// Un botón: play/pausa es un círculo blanco con el ícono negro; anterior y siguiente son
+/// íconos blancos con un círculo tenue al pasar el mouse.
+fn draw_button(
+    pixmap: &mut Pixmap,
     button: Button,
-    playing: bool,
+    c: &Controls,
     cx: f32,
     cy: f32,
     s: f32,
+    alpha: f32,
 ) {
-    match button {
-        Button::PlayPause if playing => {
+    let a = (alpha * 255.0) as u8;
+    let hovered = c.hovered == Some(button);
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+
+    if button == Button::PlayPause {
+        // Al pasar el mouse el círculo se atenúa un poco.
+        let shade = if hovered { 215 } else { 255 };
+        paint.set_color_rgba8(shade, shade, shade, a);
+        fill_circle(pixmap, &paint, cx, cy, PLAY_RADIUS * s);
+        paint.set_color_rgba8(0, 0, 0, a);
+        if c.playing {
             // Pausa: dos barras.
             fill_rounded_rect(
                 pixmap,
-                paint,
-                cx - 6.0 * s,
-                cy - 8.0 * s,
-                4.5 * s,
-                16.0 * s,
-                1.5 * s,
+                &paint,
+                cx - 5.0 * s,
+                cy - 6.0 * s,
+                3.5 * s,
+                12.0 * s,
+                1.0 * s,
             );
             fill_rounded_rect(
                 pixmap,
-                paint,
+                &paint,
                 cx + 1.5 * s,
-                cy - 8.0 * s,
-                4.5 * s,
-                16.0 * s,
-                1.5 * s,
+                cy - 6.0 * s,
+                3.5 * s,
+                12.0 * s,
+                1.0 * s,
+            );
+        } else {
+            // Play: triángulo, corrido un poco a la derecha para que se vea centrado.
+            fill_triangle(pixmap, &paint, cx - 3.5 * s, cy, 11.0 * s, 13.0 * s);
+        }
+        return;
+    }
+
+    if hovered {
+        paint.set_color_rgba8(255, 255, 255, (alpha * 28.0) as u8);
+        fill_circle(pixmap, &paint, cx, cy, BUTTON_RADIUS * s);
+    }
+    paint.set_color_rgba8(255, 255, 255, a);
+    // Anterior / siguiente: un triángulo y una barra (|◀ y ▶|).
+    let (tri_w, tri_h, bar_w) = (9.0 * s, 12.0 * s, 2.5 * s);
+    match button {
+        Button::Next => {
+            fill_triangle(pixmap, &paint, cx - 6.0 * s, cy, tri_w, tri_h);
+            fill_rounded_rect(
+                pixmap,
+                &paint,
+                cx + 3.5 * s,
+                cy - tri_h / 2.0,
+                bar_w,
+                tri_h,
+                1.0 * s,
             );
         }
-        Button::PlayPause => {
-            // Play: triángulo, corrido un poco a la derecha para que se vea centrado.
-            fill_triangle(pixmap, paint, cx - 5.0 * s, cy, 15.0 * s, 18.0 * s);
-        }
-        // Anterior / siguiente: dos triángulos pegados.
-        Button::Next => {
-            fill_triangle(pixmap, paint, cx - 9.0 * s, cy, 9.0 * s, 12.0 * s);
-            fill_triangle(pixmap, paint, cx, cy, 9.0 * s, 12.0 * s);
-        }
         Button::Prev => {
-            fill_triangle(pixmap, paint, cx + 9.0 * s, cy, -9.0 * s, 12.0 * s);
-            fill_triangle(pixmap, paint, cx, cy, -9.0 * s, 12.0 * s);
+            fill_triangle(pixmap, &paint, cx + 6.0 * s, cy, -tri_w, tri_h);
+            fill_rounded_rect(
+                pixmap,
+                &paint,
+                cx - 6.0 * s,
+                cy - tri_h / 2.0,
+                bar_w,
+                tri_h,
+                1.0 * s,
+            );
         }
+        Button::PlayPause => {}
+    }
+}
+
+fn fill_circle(pixmap: &mut Pixmap, paint: &Paint, cx: f32, cy: f32, r: f32) {
+    if let Some(circle) = PathBuilder::from_circle(cx, cy, r) {
+        pixmap.fill_path(
+            &circle,
+            paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 }
 
@@ -267,20 +388,6 @@ fn fill_triangle(pixmap: &mut Pixmap, paint: &Paint, x: f32, cy: f32, w: f32, h:
 
 /// Constante para aproximar un cuarto de círculo con una curva cúbica.
 const KAPPA: f32 = 0.552_284_8;
-
-fn notch_path(x0: f32, w: f32, h: f32, r: f32) -> Option<Path> {
-    let k = r * KAPPA;
-    let x1 = x0 + w;
-    let mut pb = PathBuilder::new();
-    pb.move_to(x0, 0.0);
-    pb.line_to(x1, 0.0);
-    pb.line_to(x1, h - r);
-    pb.cubic_to(x1, h - r + k, x1 - r + k, h, x1 - r, h);
-    pb.line_to(x0 + r, h);
-    pb.cubic_to(x0 + r - k, h, x0, h - r + k, x0, h - r);
-    pb.close();
-    pb.finish()
-}
 
 fn fill_rounded_rect(pixmap: &mut Pixmap, paint: &Paint, x: f32, y: f32, w: f32, h: f32, r: f32) {
     if let Some(path) = rounded_rect_path(x, y, w, h, r) {
