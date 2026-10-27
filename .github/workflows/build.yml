@@ -1,0 +1,113 @@
+# Compila notch-isla.exe y el instalador en GitHub Actions.
+#
+# Firma de código con SignPath Foundation: los pasos de firma solo corren cuando el repo
+# tiene configurada la variable SIGNPATH_ORGANIZATION_ID y el secreto SIGNPATH_API_TOKEN
+# (Settings > Secrets and variables > Actions). Sin ellos, se publican los archivos sin firmar.
+#
+# Orden: se firma primero el .exe y recién después se arma el instalador con ese .exe, así la
+# app instalada también queda firmada. Luego se firma el instalador.
+
+name: Compilar
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      SIGNING: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Caché de Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      - name: Compilar la app
+        run: cargo build --release
+
+      - name: Subir el .exe sin firmar
+        id: unsigned-exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: notch-isla-exe-sin-firmar
+          path: target/release/notch-isla.exe
+
+      - name: Firmar el .exe (SignPath)
+        if: env.SIGNING == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: notch-isla
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: exe
+          github-artifact-id: ${{ steps.unsigned-exe.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-exe
+
+      - name: Usar el .exe firmado
+        if: env.SIGNING == 'true'
+        shell: pwsh
+        run: Copy-Item signed-exe/notch-isla.exe target/release/notch-isla.exe -Force
+
+      - name: Instalar Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Armar el instalador
+        shell: pwsh
+        run: ./installer/build.ps1 -SkipCargo
+
+      - name: Subir el instalador sin firmar
+        id: unsigned-setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: notch-isla-setup-sin-firmar
+          path: target/installer/*.exe
+
+      - name: Firmar el instalador (SignPath)
+        if: env.SIGNING == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: notch-isla
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-setup
+
+      - name: Reunir los archivos finales
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/notch-isla.exe dist/
+          if ($env:SIGNING -eq 'true') {
+            Copy-Item signed-setup/*.exe dist/
+          } else {
+            Copy-Item target/installer/*.exe dist/
+          }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Subir los archivos finales
+        uses: actions/upload-artifact@v4
+        with:
+          name: notch-isla-${{ github.sha }}
+          path: dist/*.exe

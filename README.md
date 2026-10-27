@@ -81,3 +81,11 @@ src/
 ├─ autostart.rs   iniciar con Windows (clave Run del usuario)
 └─ fullscreen.rs  ocultar la isla cuando una app está a pantalla completa
 ```
+
+## Compilación en GitHub Actions
+
+`.github/workflows/build.yml` compila el `.exe` y el instalador en cada cambio de `main` y deja los archivos como artefactos de la ejecución. Cuando el repo tenga configurada la firma con SignPath, el mismo flujo firma primero el `.exe`, arma el instalador con él y firma el instalador.
+
+## Licencia
+
+[MIT](LICENSE).
