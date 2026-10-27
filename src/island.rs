@@ -92,12 +92,17 @@ impl Geometry {
     }
 }
 
-fn geometry(max_w: f32, max_h: f32, scale: f32, p: f32) -> Geometry {
+/// `presence`: 1 = en su sitio; 0 = escondida por encima del borde superior. Al aparecer
+/// baja desde arriba (con el rebote del resorte) y al ocultarse sube y sale de la pantalla.
+fn geometry(max_w: f32, max_h: f32, scale: f32, p: f32, presence: f32) -> Geometry {
     let p = p.clamp(-0.1, 1.1);
     let lerp = |a: f32, b: f32| a + (b - a) * p;
-    let y0 = TOP_GAP * scale;
     let w = (lerp(COLLAPSED.0, EXPANDED.0) * scale).clamp(1.0, max_w);
-    let h = (lerp(COLLAPSED.1, EXPANDED.1) * scale).clamp(1.0, max_h - y0);
+    let h = lerp(COLLAPSED.1, EXPANDED.1) * scale;
+    let gap = TOP_GAP * scale;
+    // Lo que queda por encima de y = 0 no se dibuja: así "entra" y "sale" por el borde.
+    let y0 = gap - (1.0 - presence.clamp(-0.1, 1.1)) * (h + gap);
+    let h = h.clamp(1.0, (max_h - y0).max(1.0));
     Geometry {
         x0: (max_w - w) / 2.0,
         y0,
@@ -129,8 +134,16 @@ fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 3] {
 }
 
 /// Botón bajo el punto (x, y) de la ventana, solo si el contenido ya se ve por completo.
-pub fn hit_test(max_w: f32, max_h: f32, scale: f32, p: f32, x: f32, y: f32) -> Option<Button> {
-    let g = geometry(max_w, max_h, scale, p);
+pub fn hit_test(
+    max_w: f32,
+    max_h: f32,
+    scale: f32,
+    p: f32,
+    presence: f32,
+    x: f32,
+    y: f32,
+) -> Option<Button> {
+    let g = geometry(max_w, max_h, scale, p, presence);
     if g.alpha < 1.0 {
         return None;
     }
@@ -142,19 +155,27 @@ pub fn hit_test(max_w: f32, max_h: f32, scale: f32, p: f32, x: f32, y: f32) -> O
 }
 
 /// Dibuja la isla con progreso `p` (0 = contraída, 1 = expandida; puede pasarse un poco por el rebote).
-/// `t` = segundos, para animar las barras de audio.
-/// Devuelve dónde dibujar el texto, o `None` si el contenido aún no se ve.
+/// `presence` = cuánto ha entrado en pantalla (ver `geometry`). `t` = segundos, para animar
+/// las barras de audio. Devuelve dónde dibujar el texto, o `None` si el contenido aún no se ve.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     pixmap: &mut Pixmap,
     scale: f32,
     p: f32,
+    presence: f32,
     controls: Option<Controls>,
     cover: Option<&Pixmap>,
     t: f32,
 ) -> Option<TextArea> {
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
 
-    let g = geometry(pixmap.width() as f32, pixmap.height() as f32, scale, p);
+    let g = geometry(
+        pixmap.width() as f32,
+        pixmap.height() as f32,
+        scale,
+        p,
+        presence,
+    );
     let s = scale;
 
     let mut paint = Paint {

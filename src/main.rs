@@ -165,7 +165,14 @@ struct App {
     scroll_start: Instant,
     /// Hay una app a pantalla completa en el monitor de la isla.
     fullscreen: bool,
+    /// Si la isla debe verse (hay música y no hay pantalla completa).
     visible: bool,
+    /// Si la ventana está mostrada de verdad; al ocultarse, sigue visible hasta que termine de salir.
+    shown: bool,
+    /// Entrada y salida de la pantalla: 0 = escondida arriba, 1 = en su sitio.
+    presence: Spring,
+    /// Última canción, para dibujarla mientras la isla sale si la música terminó.
+    last_media: Option<NowPlaying>,
 }
 
 impl App {
@@ -188,6 +195,9 @@ impl App {
             scroll_start: Instant::now(),
             fullscreen: false,
             visible: false,
+            shown: false,
+            presence: Spring::new(0.0, 260.0, 22.0),
+            last_media: None,
         })
     }
 
@@ -229,19 +239,24 @@ impl App {
             return;
         }
         self.visible = want;
-        unsafe {
-            if want {
-                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-            } else {
-                // Al ocultarse vuelve contraída y quieta, lista para reaparecer.
-                let _ = ShowWindow(self.hwnd, SW_HIDE);
-                self.hovered = false;
-                self.hovered_button = None;
-                self.spring.snap(0.0);
-                self.set_timer(None);
+        if want {
+            if !self.shown {
+                // Se dibuja ya escondida arriba antes de mostrar la ventana, para que no parpadee.
                 self.render();
+                unsafe {
+                    let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                }
+                self.shown = true;
             }
+            self.presence.set_target(1.0);
+        } else {
+            // Sale hacia arriba y a la vez se contrae; la ventana se oculta al terminar (en `tick`).
+            self.presence.set_target(0.0);
+            self.hovered = false;
+            self.hovered_button = None;
+            self.spring.set_target(0.0);
         }
+        self.start_animation();
     }
 
     fn set_fullscreen(&mut self, fullscreen: bool) {
@@ -251,12 +266,16 @@ impl App {
 
     /// Botón en el punto (x, y) de la ventana; sin música no hay botones.
     fn button_at(&self, x: f32, y: f32) -> Option<Button> {
+        if !self.visible {
+            return None;
+        }
         self.media.as_ref()?;
         island::hit_test(
             self.surface.width as f32,
             self.surface.height as f32,
             self.scale,
             self.spring.value,
+            self.presence.value,
             x,
             y,
         )
@@ -283,13 +302,17 @@ impl App {
             // Canción nueva: el desplazamiento empieza otra vez desde el principio.
             self.scroll_start = Instant::now();
         }
+        if media.is_some() {
+            self.last_media = media.clone();
+        }
         self.media = media;
         self.update_visibility();
         self.redraw();
     }
 
     fn set_hovered(&mut self, hovered: bool) {
-        if self.hovered == hovered {
+        // Mientras sale de la pantalla no responde al mouse.
+        if self.hovered == hovered || (hovered && !self.visible) {
             return;
         }
         self.hovered = hovered;
@@ -319,8 +342,18 @@ impl App {
         let dt = now.duration_since(self.last_tick).as_secs_f32();
         self.last_tick = now;
 
-        let moving = self.spring.step(dt);
+        let expanding = self.spring.step(dt);
+        let entering = self.presence.step(dt);
+        let moving = expanding || entering;
         let motion = self.render();
+
+        // Terminó de salir: ahora sí se oculta la ventana.
+        if !self.visible && !entering && self.shown {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+            self.shown = false;
+        }
 
         // El temporizador sigue solo mientras algo se mueve, y al ritmo que eso necesita.
         self.set_timer(timer_for(&motion, moving));
@@ -342,8 +375,10 @@ impl App {
 
     /// Dibuja el cuadro actual y dice qué sigue moviéndose.
     fn render(&mut self) -> Motion {
-        let cover = self.media.as_ref().and_then(|m| m.cover.as_ref());
-        let controls = self.media.as_ref().map(|m| Controls {
+        // Si la música acaba de terminar, la isla sale mostrando la última canción, no vacía.
+        let media = self.media.as_ref().or(self.last_media.as_ref());
+        let cover = media.and_then(|m| m.cover.as_ref());
+        let controls = media.map(|m| Controls {
             playing: m.playing,
             hovered: self.hovered_button,
             accent: cover.map_or([255, 255, 255], |c| c.accent),
@@ -355,6 +390,7 @@ impl App {
             &mut self.surface.pixmap,
             self.scale,
             self.spring.value,
+            self.presence.value,
             controls,
             cover.map(|c| c.image.as_ref()),
             self.started.elapsed().as_secs_f32(),
@@ -362,7 +398,7 @@ impl App {
         self.surface.copy_to_dib();
         let mut scrolling = false;
         if let (Some(area), Some(text)) = (area, self.text.as_mut()) {
-            let (title, subtitle) = match &self.media {
+            let (title, subtitle) = match media {
                 Some(m) => {
                     let title = if m.title.is_empty() {
                         "Sin título"
@@ -402,7 +438,8 @@ impl App {
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
-            SourceConstantAlpha: 255,
+            // Opacidad global: la isla se desvanece mientras entra o sale de la pantalla.
+            SourceConstantAlpha: (self.presence.value.clamp(0.0, 1.0) * 255.0) as u8,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         unsafe {
