@@ -1,6 +1,6 @@
 [package]
 name = "notch-isla"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/gportal21/notch-isla"
@@ -11,6 +11,8 @@ description = "Isla dinámica minimalista para Windows, enfocada en controlar la
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 # Vector2 para Direct2D (ya viene con `windows`; aquí solo se nombra el tipo).
 windows-numerics = "0.3"
+# El macro `implement` (avisos de volumen y de salida de audio) genera código que la nombra.
+windows-core = "0.62"
 
 [dependencies.windows]
 version = "0.62"
@@ -46,6 +48,10 @@ features = [
     # Actualizaciones: consulta el último release en GitHub, descarga y verifica el instalador.
     "Win32_Networking_WinHttp",
     "Win32_Security_Cryptography",
+    # Sonido de "se acabó el tiempo" del temporizador (MessageBeep).
+    "Win32_System_Diagnostics_Debug",
+    # Aviso de salida de audio: nombre del dispositivo.
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

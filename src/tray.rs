@@ -1,25 +1,27 @@
-//! Ícono en la bandeja del sistema, su menú (iniciar con Windows, actualización, salir)
-//! y el aviso de versión nueva.
+//! Ícono en la bandeja del sistema, su menú (ajustes, temporizador, actualización, salir)
+//! y los globos de aviso.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use windows::core::{w, Result, HSTRING};
-use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, POINT, WPARAM};
+use windows::core::{w, Result};
+use windows::Win32::Foundation::{E_FAIL, HWND};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     DIB_RGB_COLORS,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER,
-    NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
-    GetSystemMetrics, LoadIconW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow,
-    TrackPopupMenu, HICON, ICONINFO, IDI_APPLICATION, MF_CHECKED, MF_SEPARATOR, MF_STRING,
-    SM_CXSMICON, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_NULL,
+    CreateIconIndirect, DestroyIcon, GetSystemMetrics, LoadIconW, RegisterWindowMessageW, HICON,
+    ICONINFO, IDI_APPLICATION, SM_CXSMICON, WM_APP,
 };
 
+use crate::menu::{self, Item};
+use crate::monitors::{self, Monitor};
+use crate::routing::Output;
+use crate::settings::{Settings, HIDE_DELAYS};
 use crate::{autostart, island};
 
 /// Mensaje que Windows nos manda cuando hay clics sobre el ícono.
@@ -29,11 +31,45 @@ const TRAY_ID: u32 = 1;
 const CMD_AUTOSTART: usize = 1;
 const CMD_EXIT: usize = 2;
 const CMD_UPDATE: usize = 3;
+const CMD_NOTICES: usize = 4;
+const CMD_FULLSCREEN: usize = 5;
+const CMD_CANCEL_TIMER: usize = 6;
+const CMD_LYRICS: usize = 7;
+/// Las opciones de los submenús van numeradas a partir de estas bases.
+const CMD_HIDE_DELAY: usize = 100;
+const CMD_MONITOR: usize = 200;
+const CMD_TIMER: usize = 300;
+/// Menú de salida de audio de la isla.
+const CMD_OUTPUT_DEFAULT: usize = 400;
+const CMD_OUTPUT: usize = 401;
+
+/// Duraciones del temporizador en minutos.
+pub const TIMER_MINUTES: [u32; 6] = [5, 10, 15, 25, 45, 60];
 
 pub enum Command {
     ToggleAutostart,
     Update,
     Exit,
+    /// Segundos para ocultarse sola (0 = nunca).
+    HideDelay(u32),
+    /// Posición en la lista de pantallas.
+    Monitor(usize),
+    /// Minutos del temporizador.
+    Timer(u32),
+    CancelTimer,
+    ToggleNotices,
+    ToggleFullscreen,
+    ToggleLyrics,
+}
+
+/// Lo que el menú necesita saber para marcar las opciones actuales.
+pub struct MenuState<'a> {
+    /// Texto de la opción de actualizar, si hay una versión nueva; va arriba de todo.
+    pub update: Option<&'a str>,
+    pub settings: &'a Settings,
+    pub monitors: &'a [Monitor],
+    /// Minutos que le quedan al temporizador, si hay uno en marcha.
+    pub timer_left: Option<u32>,
 }
 
 /// Mensaje "TaskbarCreated": llega si el Explorador se reinicia y hay que volver a poner el ícono.
@@ -119,54 +155,154 @@ impl Drop for Tray {
     }
 }
 
-/// Muestra el menú junto al cursor y devuelve la opción elegida.
+/// Muestra el menú de la bandeja junto al cursor y devuelve la opción elegida.
 ///
 /// No recibe `&Tray` a propósito: el menú corre su propio bucle de mensajes y la ventana
 /// sigue recibiendo mensajes mientras está abierto (no debe haber un préstamo de la app activo).
-/// `update`: texto de la opción de actualizar, si hay una versión nueva; va arriba de todo.
-pub fn show_menu(hwnd: HWND, update: Option<&str>) -> Option<Command> {
-    unsafe {
-        let menu = CreatePopupMenu().ok()?;
-        if let Some(label) = update {
-            let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, &HSTRING::from(label));
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        }
-        let autostart_flags = if autostart::is_enabled() {
-            MF_STRING | MF_CHECKED
-        } else {
-            MF_STRING
-        };
-        let _ = AppendMenuW(
-            menu,
-            autostart_flags,
-            CMD_AUTOSTART,
-            w!("Iniciar con Windows"),
-        );
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT, w!("Salir"));
+pub fn show_menu(state: &MenuState) -> Option<Command> {
+    let settings = state.settings;
+    let action = |id: usize, label: &str, checked: bool| Item::Action {
+        id,
+        label: label.to_string(),
+        checked,
+    };
+    let mut items = Vec::new();
+    if let Some(label) = state.update {
+        items.push(action(CMD_UPDATE, label, false));
+        items.push(Item::Separator);
+    }
 
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        // Sin esto el menú no se cierra al hacer clic fuera (comportamiento documentado de Windows).
-        let _ = SetForegroundWindow(hwnd);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
-            pt.x,
-            pt.y,
-            None,
-            hwnd,
-            None,
-        );
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
+    let delays = HIDE_DELAYS
+        .iter()
+        .enumerate()
+        .map(|(i, &secs)| {
+            let label = match secs {
+                0 => "Nunca".to_string(),
+                s => format!("{s} segundos"),
+            };
+            action(CMD_HIDE_DELAY + i, &label, settings.hide_delay == secs)
+        })
+        .collect();
+    items.push(Item::Group {
+        label: "Ocultarse sola tras".to_string(),
+        items: delays,
+    });
 
-        match cmd.0 as usize {
-            CMD_AUTOSTART => Some(Command::ToggleAutostart),
-            CMD_UPDATE => Some(Command::Update),
-            CMD_EXIT => Some(Command::Exit),
-            _ => None,
+    if state.monitors.len() > 1 {
+        let current = monitors::find(&settings.monitor);
+        let screens = state
+            .monitors
+            .iter()
+            .enumerate()
+            .map(|(i, m)| action(CMD_MONITOR + i, &m.label, m.handle == current))
+            .collect();
+        items.push(Item::Group {
+            label: "Pantalla".to_string(),
+            items: screens,
+        });
+    }
+
+    let mut timer = Vec::new();
+    if let Some(left) = state.timer_left {
+        timer.push(action(
+            CMD_CANCEL_TIMER,
+            &format!("Cancelar (quedan {left} min)"),
+            false,
+        ));
+    }
+    for (i, min) in TIMER_MINUTES.iter().enumerate() {
+        timer.push(action(CMD_TIMER + i, &format!("{min} minutos"), false));
+    }
+    items.push(Item::Group {
+        label: "Temporizador".to_string(),
+        items: timer,
+    });
+
+    items.push(Item::Separator);
+    items.push(action(
+        CMD_LYRICS,
+        "Mostrar letra de la canción",
+        settings.lyrics,
+    ));
+    // La letra se pide a internet: se dice a quién, para que cada uno decida activarla.
+    items.push(Item::Label("Se busca en lrclib.net".to_string()));
+    items.push(action(
+        CMD_NOTICES,
+        "Avisar al cambiar la salida de audio",
+        settings.notices,
+    ));
+    items.push(action(
+        CMD_FULLSCREEN,
+        "Ocultar en pantalla completa",
+        settings.hide_fullscreen,
+    ));
+    items.push(action(
+        CMD_AUTOSTART,
+        "Iniciar con Windows",
+        autostart::is_enabled(),
+    ));
+    items.push(Item::Separator);
+    items.push(Item::Label(
+        "Mostrar u ocultar la isla: Ctrl + Alt + N".to_string(),
+    ));
+    items.push(Item::Separator);
+    items.push(action(CMD_EXIT, "Salir", false));
+
+    let id = menu::show(items)?;
+    let pick = |base: usize, len: usize| (base..base + len).contains(&id).then(|| id - base);
+    match id {
+        CMD_AUTOSTART => Some(Command::ToggleAutostart),
+        CMD_UPDATE => Some(Command::Update),
+        CMD_EXIT => Some(Command::Exit),
+        CMD_NOTICES => Some(Command::ToggleNotices),
+        CMD_FULLSCREEN => Some(Command::ToggleFullscreen),
+        CMD_CANCEL_TIMER => Some(Command::CancelTimer),
+        CMD_LYRICS => Some(Command::ToggleLyrics),
+        _ => {
+            if let Some(i) = pick(CMD_HIDE_DELAY, HIDE_DELAYS.len()) {
+                Some(Command::HideDelay(HIDE_DELAYS[i]))
+            } else if let Some(i) = pick(CMD_MONITOR, state.monitors.len()) {
+                Some(Command::Monitor(i))
+            } else {
+                pick(CMD_TIMER, TIMER_MINUTES.len()).map(|i| Command::Timer(TIMER_MINUTES[i]))
+            }
         }
+    }
+}
+
+/// Menú de clic derecho sobre la isla: la salida de audio de la app que suena.
+/// Devuelve `Some(None)` = la predeterminada del sistema, `Some(Some(i))` = la salida `i`.
+/// `unavailable`: por qué no se puede elegir (el menú solo lo explica), o `None` si se puede.
+pub fn show_output_menu(
+    app: &str,
+    outputs: &[Output],
+    current: Option<&str>,
+    unavailable: Option<&str>,
+) -> Option<Option<usize>> {
+    let mut items = vec![
+        Item::Label(format!("Salida de audio de {app}")),
+        Item::Separator,
+    ];
+    if let Some(reason) = unavailable {
+        items.push(Item::Label(reason.to_string()));
+    } else {
+        items.push(Item::Action {
+            id: CMD_OUTPUT_DEFAULT,
+            label: "Predeterminada del sistema".to_string(),
+            checked: current.is_none(),
+        });
+        for (i, o) in outputs.iter().enumerate() {
+            items.push(Item::Action {
+                id: CMD_OUTPUT + i,
+                label: o.name.clone(),
+                checked: current == Some(o.id.as_str()),
+            });
+        }
+    }
+    match menu::show(items)? {
+        CMD_OUTPUT_DEFAULT => Some(None),
+        id if (CMD_OUTPUT..CMD_OUTPUT + outputs.len()).contains(&id) => Some(Some(id - CMD_OUTPUT)),
+        _ => None,
     }
 }
 

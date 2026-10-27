@@ -24,6 +24,13 @@ impl Spring {
         self.target = target;
     }
 
+    /// Salta a `value` sin animación y queda quieto ahí.
+    pub fn reset(&mut self, value: f32) {
+        self.value = value;
+        self.target = value;
+        self.velocity = 0.0;
+    }
+
     /// Avanza la simulación `dt` segundos. Devuelve `true` mientras siga en movimiento.
     pub fn step(&mut self, dt: f32) -> bool {
         // Limita saltos grandes (p. ej. si la PC se trabó) y subdivide para estabilidad.

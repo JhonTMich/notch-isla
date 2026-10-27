@@ -49,14 +49,22 @@ cargo run --example icon
 **Uso:**
 
 - La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
-- Si no la usas, a los 3 s sube y se oculta para no tapar lo que hay debajo (pestañas del navegador, etc.). Queda una línea fina en el borde superior, con el avance de la canción en el color de la carátula; lleva el mouse a esa línea para traer la isla de vuelta.
+- Si no la usas, a los 3 s (se cambia en la bandeja) sube y se oculta para no tapar lo que hay debajo (pestañas del navegador, etc.). Queda una línea fina en el borde superior, con el avance de la canción en el color de la carátula; lleva el mouse a esa línea para traer la isla de vuelta. **Ctrl + Alt + N** la oculta o la trae en cualquier momento.
 - Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que se mueven mientras suena la música.
 - Pasa el mouse sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente.
 - En la esquina de la carátula, el ícono de la app que suena (Spotify, Chrome...). Si hay varias apps con música, unos puntos bajo la carátula lo indican y un clic en ella pasa a la siguiente.
 - Debajo, una barra de progreso con el color de la carátula; haz clic en ella para saltar a ese punto de la canción (si la app informa el tiempo).
-- Gira la rueda del mouse sobre la isla para subir o bajar el volumen de Windows; la barra muestra el nivel un momento.
+- Gira la rueda del mouse sobre la isla para subir o bajar el volumen de la app que suena (como en el Mezclador de volumen de Windows); con **Ctrl** apretado cambia el volumen general. La barra muestra el nivel un momento. Si no se encuentra el sonido de la app, la rueda cambia el volumen general. En los navegadores el volumen es el de todo el navegador, no el de una pestaña.
+- **Clic derecho sobre la isla**: elige por qué salida suena la app (por ejemplo, Spotify en los audífonos y el resto en los parlantes), o devuélvela a la predeterminada del sistema. Windows lo recuerda para esa app. Usa una función interna de Windows (la misma del Mezclador de volumen) sin documentación oficial: si una actualización de Windows la cambia, el menú lo indica y el resto de la isla sigue funcionando igual. Algunas apps tardan unos segundos en pasarse a la nueva salida o necesitan pausar y reanudar.
+- **Letra sincronizada** (opcional): activa **Mostrar letra de la canción** en la bandeja y, mientras suena la música, el verso que se canta aparece en un "proyector" bajo la isla: una píldora negra que se ajusta al largo de cada verso, que aparece desvaneciéndose y que sigue a la isla (también cuando se oculta en el borde). Los clics la atraviesan, así que no tapa nada. La letra se pide a [LRCLIB](https://lrclib.net) una vez por canción (se envían título, artista, álbum y duración; ver [PRIVACY.md](PRIVACY.md)). Funciona con las apps que informan el avance de la canción, como Spotify.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
-- Clic derecho en el ícono de la bandeja: **Iniciar con Windows** y **Salir**.
+- **Salida de audio**: al cambiar a otra salida (audífonos, parlantes), la isla baja un momento con su nombre, aunque no haya música. Un clic cierra el aviso.
+- Clic derecho en el ícono de la bandeja:
+  - **Ocultarse sola tras**: 3, 5, 10 o 30 segundos, o nunca.
+  - **Pantalla**: en qué monitor va la isla (si hay más de uno).
+  - **Temporizador**: de 5 a 60 minutos; al terminar suena y la isla avisa.
+  - **Avisar al cambiar la salida de audio**, **Ocultar en pantalla completa**, **Iniciar con Windows** y **Salir**.
+  - Los ajustes se guardan en `HKEY_CURRENT_USER\Software\NotchIsla`.
 - Al minuto de abrirse y luego cada 6 horas, consulta en GitHub si hay una versión nueva. Si la app está instalada, descarga el instalador en segundo plano, lo verifica (tamaño y SHA-256 publicados por GitHub) y avisa: un clic en el aviso, o en **Instalar la versión X** del menú de la bandeja, actualiza sin ventanas y la isla vuelve a abrirse sola. La versión portable solo avisa y abre la página de descarga. Ver [PRIVACY.md](PRIVACY.md).
 
 ## Cómo está hecha
@@ -68,6 +76,7 @@ cargo run --example icon
 - **Música por SMTC** (`Windows.Media.Control`) con eventos, sin sondeo. Los eventos llegan en otros hilos y se pasan a la ventana con `PostMessageW`.
 - **Carátula** decodificada con WIC (`Windows.Graphics.Imaging`), recortada al centro.
 - **Texto** con DirectWrite, dibujado por Direct2D en modo software sobre el mismo mapa de bits.
+- **Menús propios** dibujados igual que la isla (ventana layered, tiny-skia y DirectWrite), en lugar del menú clásico de Windows. Los grupos se despliegan dentro del mismo menú; se usa con el mouse o con las flechas, Enter y Esc.
 - **Pantalla completa** detectada registrando la ventana como appbar (`ABN_FULLSCREENAPP`), también sin sondeo.
 
 ```
@@ -79,8 +88,15 @@ src/
 ├─ appicon.rs     ícono de la app que suena (shell de Windows o su .exe)
 ├─ text.rs        título y artista con DirectWrite, desplazamiento de textos largos
 ├─ tray.rs        ícono en la bandeja y su menú
-├─ audio.rs       volumen general con Core Audio (rueda del mouse)
+├─ menu.rs        menús con el estilo de la isla (bandeja y clic derecho sobre la isla)
+├─ settings.rs    ajustes del menú, guardados en el registro del usuario
+├─ monitors.rs    pantallas conectadas, para elegir dónde va la isla
+├─ system.rs      aviso de cambio de salida de audio (eventos de Core Audio)
+├─ audio.rs       volumen de la app que suena o general, con Core Audio (rueda del mouse)
+├─ routing.rs     salida de audio por app (interfaz interna de Windows, con respaldo si falta)
 ├─ autostart.rs   iniciar con Windows (clave Run del usuario)
+├─ lyrics.rs      letra sincronizada de LRCLIB (formato LRC)
+├─ projector.rs   proyector de la letra bajo la isla (ventana que no recibe clics)
 ├─ update.rs      actualizaciones: último release en GitHub, descarga e instalación (WinHTTP)
 └─ fullscreen.rs  ocultar la isla cuando una app está a pantalla completa
 ```

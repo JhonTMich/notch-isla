@@ -161,6 +161,20 @@ pub struct Controls {
     pub update_hovered: bool,
 }
 
+/// Ícono de un aviso del sistema.
+#[derive(Clone, Copy, PartialEq)]
+pub enum NoticeIcon {
+    /// Salida de audio (audífonos, parlantes).
+    Audio,
+    Timer,
+}
+
+/// Aviso que ocupa la isla expandida: ícono a la izquierda y textos (los dibuja DirectWrite).
+pub struct Notice {
+    pub icon: NoticeIcon,
+    pub color: [u8; 3],
+}
+
 /// Duración de la animación al pulsar un botón.
 pub const PRESS_SECS: f32 = 0.35;
 
@@ -258,6 +272,13 @@ fn geometry(max_w: f32, max_h: f32, scale: f32, p: f32, presence: f32) -> Geomet
     }
 }
 
+/// Borde inferior de la isla en la ventana (píxeles físicos; negativo si está escondida
+/// arriba): ahí debajo va el proyector de la letra.
+pub fn bottom(max_w: f32, max_h: f32, scale: f32, p: f32, presence: f32) -> f32 {
+    let g = geometry(max_w, max_h, scale, p, presence);
+    g.y0 + g.h
+}
+
 /// Columna entre la carátula y los botones: (x, ancho). El texto nunca pasa de aquí.
 fn text_column(g: &Geometry, s: f32) -> (f32, f32) {
     let x = g.x0 + (COVER.0 + COVER.1 + 10.0) * s;
@@ -335,6 +356,7 @@ pub fn draw(
     p: f32,
     presence: f32,
     controls: Option<Controls>,
+    notice: Option<&Notice>,
     cover: Option<&Pixmap>,
     app_icon: Option<&Pixmap>,
     t: f32,
@@ -391,6 +413,11 @@ pub fn draw(
         return None;
     }
 
+    // Un aviso reemplaza a la música mientras dura.
+    if let Some(n) = notice {
+        return Some(draw_notice(pixmap, &g, n));
+    }
+
     let (cover_x, cover_y, size) = g.cover_rect();
     draw_cover(pixmap, cover, cover_x, cover_y, size, COVER.2 * s, g.alpha);
 
@@ -445,6 +472,90 @@ pub fn draw(
         cy: g.row_cy(),
         alpha: g.alpha,
     })
+}
+
+/// Aviso: ícono en un recuadro teñido donde va la carátula. Devuelve el espacio para los textos, que llega hasta el borde derecho (no hay botones).
+fn draw_notice(pixmap: &mut Pixmap, g: &Geometry, n: &Notice) -> TextArea {
+    let s = g.scale;
+    let (x, y, size) = g.cover_rect();
+    let [r, gr, b] = n.color;
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(r, gr, b, (g.alpha * 46.0) as u8);
+    fill_rounded_rect(pixmap, &paint, x, y, size, size, COVER.2 * s);
+    paint.set_color_rgba8(r, gr, b, (g.alpha * 255.0) as u8);
+    draw_notice_icon(pixmap, &paint, n.icon, x + size / 2.0, y + size / 2.0, s);
+    let text_x = x + size + 10.0 * s;
+    TextArea {
+        x: text_x,
+        w: (g.x1() - 16.0 * s - text_x).max(0.0),
+        cy: g.row_cy(),
+        alpha: g.alpha,
+    }
+}
+
+/// Íconos de línea, de unos 20 px lógicos, centrados en (cx, cy).
+fn draw_notice_icon(
+    pixmap: &mut Pixmap,
+    paint: &Paint,
+    icon: NoticeIcon,
+    cx: f32,
+    cy: f32,
+    s: f32,
+) {
+    let line = 1.8 * s;
+    match icon {
+        NoticeIcon::Audio => {
+            // Audífonos: un arco y dos almohadillas.
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx - 8.0 * s, cy + 3.0 * s);
+            pb.line_to(cx - 8.0 * s, cy - 1.0 * s);
+            pb.cubic_to(
+                cx - 8.0 * s,
+                cy - 11.0 * s,
+                cx + 8.0 * s,
+                cy - 11.0 * s,
+                cx + 8.0 * s,
+                cy - 1.0 * s,
+            );
+            pb.line_to(cx + 8.0 * s, cy + 3.0 * s);
+            stroke(pixmap, paint, pb, line);
+            fill_rounded_rect(pixmap, paint, cx - 10.0 * s, cy, 5.0 * s, 9.0 * s, 2.0 * s);
+            fill_rounded_rect(pixmap, paint, cx + 5.0 * s, cy, 5.0 * s, 9.0 * s, 2.0 * s);
+        }
+        NoticeIcon::Timer => {
+            // Cronómetro: esfera, aguja y botón arriba.
+            let cy = cy + 1.0 * s;
+            if let Some(circle) = PathBuilder::from_circle(cx, cy, 8.0 * s) {
+                stroke_path(pixmap, paint, &circle, line);
+            }
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx, cy);
+            pb.line_to(cx, cy - 4.5 * s);
+            pb.move_to(cx - 2.5 * s, cy - 11.0 * s);
+            pb.line_to(cx + 2.5 * s, cy - 11.0 * s);
+            stroke(pixmap, paint, pb, line);
+        }
+    }
+}
+
+/// Traza las líneas de `pb` con puntas redondeadas.
+pub(crate) fn stroke(pixmap: &mut Pixmap, paint: &Paint, pb: PathBuilder, width: f32) {
+    if let Some(path) = pb.finish() {
+        stroke_path(pixmap, paint, &path, width);
+    }
+}
+
+pub(crate) fn stroke_path(pixmap: &mut Pixmap, paint: &Paint, path: &Path, width: f32) {
+    let stroke = tiny_skia::Stroke {
+        width,
+        line_cap: tiny_skia::LineCap::Round,
+        line_join: tiny_skia::LineJoin::Round,
+        ..Default::default()
+    };
+    pixmap.stroke_path(path, paint, &stroke, Transform::identity(), None);
 }
 
 /// Insignia con el ícono de la app, montada sobre la esquina inferior derecha de la carátula
@@ -694,7 +805,15 @@ fn fill_triangle(pixmap: &mut Pixmap, paint: &Paint, x: f32, cy: f32, w: f32, h:
 /// Constante para aproximar un cuarto de círculo con una curva cúbica.
 const KAPPA: f32 = 0.552_284_8;
 
-fn fill_rounded_rect(pixmap: &mut Pixmap, paint: &Paint, x: f32, y: f32, w: f32, h: f32, r: f32) {
+pub(crate) fn fill_rounded_rect(
+    pixmap: &mut Pixmap,
+    paint: &Paint,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+) {
     if let Some(path) = rounded_rect_path(x, y, w, h, r) {
         pixmap.fill_path(&path, paint, FillRule::Winding, Transform::identity(), None);
     }
@@ -728,7 +847,7 @@ pub fn tray_icon(size: u32) -> Option<Pixmap> {
     Some(pixmap)
 }
 
-fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
+pub(crate) fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
     if w <= 0.0 || h <= 0.0 {
         return None;
     }

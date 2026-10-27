@@ -259,7 +259,7 @@ fn scroll_offset(overflow: f32, speed: f32, t: f32) -> f32 {
 }
 
 /// Formato de una línea: sin saltos (el desplazamiento muestra lo que no cabe).
-fn make_format(
+pub(crate) fn make_format(
     dwrite: &IDWriteFactory,
     weight: DWRITE_FONT_WEIGHT,
     size: f32,

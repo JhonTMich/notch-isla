@@ -177,7 +177,13 @@ fn install(installer: &Path) -> bool {
         "/MERGETASKS=!autostart"
     };
     std::process::Command::new(installer)
-        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", tasks])
+        .args([
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/SP-",
+            tasks,
+        ])
         .spawn()
         .is_ok()
 }
@@ -223,7 +229,9 @@ fn download_installer(json: &str, tag: &str, version: &str) -> Option<PathBuf> {
         .to_ascii_lowercase();
 
     let path = std::env::temp_dir().join(&name);
-    let valid = |data: &[u8]| data.len() as u64 == size && sha256_hex(data).as_deref() == Some(digest.as_str());
+    let valid = |data: &[u8]| {
+        data.len() as u64 == size && sha256_hex(data).as_deref() == Some(digest.as_str())
+    };
     if std::fs::read(&path).is_ok_and(|data| valid(&data)) {
         return Some(path);
     }
@@ -250,8 +258,8 @@ fn sha256_hex(data: &[u8]) -> Option<String> {
         .then(|| hash.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// GET por HTTPS. `json` = pedir la respuesta de la API de GitHub.
-fn get(host: &str, path: &str, json: bool) -> Option<Vec<u8>> {
+/// GET por HTTPS. `json` = pedir la respuesta de la API de GitHub. Lo usa también la letra.
+pub(crate) fn get(host: &str, path: &str, json: bool) -> Option<Vec<u8>> {
     unsafe {
         let agent = HSTRING::from(format!("notch-isla/{}", env!("CARGO_PKG_VERSION")));
         let session = Handle(WinHttpOpen(
@@ -284,7 +292,9 @@ fn get(host: &str, path: &str, json: bool) -> Option<Vec<u8>> {
             return None;
         }
         let headers: Vec<u16> = if json {
-            "Accept: application/vnd.github+json".encode_utf16().collect()
+            "Accept: application/vnd.github+json"
+                .encode_utf16()
+                .collect()
         } else {
             Vec::new()
         };
@@ -399,7 +409,8 @@ mod tests {
         let tag = json_string(&json, "tag_name").unwrap();
         let version = tag.trim_start_matches('v');
         assert!(is_newer(version, "0.0.0"), "versión rara: {version}");
-        let path = download_installer(&json, tag, version).expect("descarga o verificación fallida");
+        let path =
+            download_installer(&json, tag, version).expect("descarga o verificación fallida");
         assert!(path.exists());
     }
 }

@@ -36,12 +36,16 @@ const COVER_PX: u32 = 168;
 pub struct NowPlaying {
     pub title: String,
     pub artist: String,
+    /// Álbum (puede venir vacío): ayuda a encontrar la letra exacta.
+    pub album: String,
     pub playing: bool,
     pub cover: Option<Cover>,
     /// Avance de la canción; `None` si la app no lo informa (pasa con algunos navegadores).
     pub timeline: Option<Timeline>,
     /// Ícono de la app que suena (Spotify, Chrome...), si se pudo obtener.
     pub app_icon: Option<AppIcon>,
+    /// Identificador de la app en SMTC ("Spotify.exe", "Chrome"...): con él se busca su volumen.
+    pub app_id: String,
     /// (posición de la sesión mostrada, cantidad de apps con música). Con 2 o más, un clic en
     /// la carátula pasa a la siguiente.
     pub sessions: (usize, usize),
@@ -406,6 +410,7 @@ fn publish(refresh_cover: bool) {
     if let Some(info) = info.as_mut() {
         info.sessions = sessions;
         info.app_icon = id.as_deref().and_then(app_icon);
+        info.app_id = id.unwrap_or_default();
     }
     post(hwnd, info);
 }
@@ -481,11 +486,13 @@ fn read(session: &Session, refresh_cover: bool, cached: Option<Cover>) -> Result
     Ok(NowPlaying {
         title: props.Title()?.to_string_lossy(),
         artist: props.Artist()?.to_string_lossy(),
+        album: props.AlbumTitle()?.to_string_lossy(),
         playing,
         cover,
         timeline: read_timeline(session, playing).ok().flatten(),
         // Los completa `publish`, que sabe qué sesión es y cuántas hay.
         app_icon: None,
+        app_id: String::new(),
         sessions: (0, 0),
     })
 }
