@@ -1,0 +1,44 @@
+# notch-isla
+
+Isla dinámica (estilo Dynamic Island) para Windows 10/11, escrita en Rust.
+Objetivo: controlar la música que suena en el PC (Spotify, YouTube, etc.) desde una píldora en el borde superior de la pantalla, consumiendo lo mínimo posible.
+
+## Estado
+
+| Paso | Qué hace | Estado |
+|---|---|---|
+| 1 | Píldora negra arriba al centro que se expande con rebote al pasar el mouse | ✅ |
+| 2 | Leer la canción que suena (título, artista, carátula) vía SMTC | ⏳ |
+| 3 | Controles: play/pausa, siguiente, anterior | ⏳ |
+| 4 | Ícono en la bandeja, inicio con Windows | ⏳ |
+
+## Requisitos
+
+- Windows 10 (1809+) u 11, 64 bits.
+- [Rust](https://rustup.rs) con el toolchain `stable-x86_64-pc-windows-msvc`.
+- Visual Studio Build Tools con la carga de trabajo **"Desarrollo para el escritorio con C++"** (aporta el enlazador `link.exe`).
+
+## Ejecutar
+
+```powershell
+cargo run            # modo debug (abre una consola para ver mensajes)
+cargo run --release  # versión optimizada, sin consola
+```
+
+El ejecutable final queda en `target\release\notch-isla.exe`.
+
+**Uso (paso 1):** pasa el mouse sobre la píldora para expandirla. **Clic derecho** la cierra.
+
+## Cómo está hecha
+
+- **Ventana layered** (`UpdateLayeredWindow`) con transparencia por píxel: los píxeles transparentes dejan pasar los clics a las ventanas de abajo.
+- Dibujo con [tiny-skia](https://github.com/linebender/tiny-skia) (anti-aliasing, curvas) sobre un mapa de bits en memoria.
+- Animación con un **resorte amortiguado** (`src/spring.rs`). El temporizador de ~60 fps solo existe mientras la isla se mueve: **en reposo, 0 % de CPU**.
+- Consciente del DPI por monitor (nítida con escalado 125 %, 150 %…).
+
+```
+src/
+├─ main.rs    ventana, mensajes de Windows, bucle de animación
+├─ island.rs  geometría y dibujo de la isla
+└─ spring.rs  física del resorte
+```
