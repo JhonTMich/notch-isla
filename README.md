@@ -38,6 +38,7 @@ cargo run --example icon
 - La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
 - Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que se mueven mientras suena la música.
 - Pasa el mouse sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente.
+- En la esquina de la carátula, el ícono de la app que suena (Spotify, Chrome...). Si hay varias apps con música, unos puntos bajo la carátula lo indican y un clic en ella pasa a la siguiente.
 - Debajo, una barra de progreso con el color de la carátula; haz clic en ella para saltar a ese punto de la canción (si la app informa el tiempo).
 - Gira la rueda del mouse sobre la isla para subir o bajar el volumen de Windows; la barra muestra el nivel un momento.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
@@ -59,7 +60,8 @@ src/
 ├─ main.rs        ventana, mensajes de Windows, bucle de animación
 ├─ island.rs      geometría y dibujo de la isla, botones e ícono de la bandeja
 ├─ spring.rs      física del resorte
-├─ media.rs       música actual vía SMTC, carátula y órdenes de reproducción
+├─ media.rs       música vía SMTC: sesiones, carátula y órdenes de reproducción
+├─ appicon.rs     ícono de la app que suena (shell de Windows o su .exe)
 ├─ text.rs        título y artista con DirectWrite, desplazamiento de textos largos
 ├─ tray.rs        ícono en la bandeja y su menú
 ├─ audio.rs       volumen general con Core Audio (rueda del mouse)

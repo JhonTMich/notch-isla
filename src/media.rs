@@ -3,6 +3,7 @@
 //! Todo funciona por eventos, sin sondeo. Los eventos de WinRT llegan en hilos del sistema,
 //! así que cada cambio se envía a la ventana con `PostMessageW(WM_MEDIA)`.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,6 +23,7 @@ use windows::Media::Control::{
 use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
+use crate::appicon;
 use crate::island::Button;
 
 /// Mensaje propio: `lparam` lleva un `Box<Option<NowPlaying>>` que la ventana debe liberar con `take`.
@@ -38,7 +40,25 @@ pub struct NowPlaying {
     pub cover: Option<Cover>,
     /// Avance de la canción; `None` si la app no lo informa (pasa con algunos navegadores).
     pub timeline: Option<Timeline>,
+    /// Ícono de la app que suena (Spotify, Chrome...), si se pudo obtener.
+    pub app_icon: Option<AppIcon>,
+    /// (posición de la sesión mostrada, cantidad de apps con música). Con 2 o más, un clic en
+    /// la carátula pasa a la siguiente.
+    pub sessions: (usize, usize),
 }
+
+/// Ícono de una app en RGBA premultiplicado. Se compara por identidad, como `Cover`.
+#[derive(Clone)]
+pub struct AppIcon(pub Arc<Pixmap>);
+
+impl PartialEq for AppIcon {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Identifica una sesión: el id de la app y, si una misma app tiene varias, cuál de ellas.
+type SessionKey = (String, usize);
 
 /// Posición de la canción en un instante. SMTC no avisa cada segundo: entre avisos la
 /// posición se calcula sumando el tiempo transcurrido mientras suena.
@@ -105,10 +125,18 @@ fn accent_of(pixmap: &Pixmap) -> [u8; 3] {
 
 struct Watcher {
     manager: Manager,
-    /// Sesión actual y los tokens de sus eventos (para desuscribirse al cambiar de sesión).
+    /// Sesión mostrada y los tokens de sus eventos (para desuscribirse al cambiar de sesión).
     session: Option<(Session, [i64; 3])>,
+    session_key: Option<SessionKey>,
+    /// Sesión elegida a mano con clic en la carátula. `None` = seguir la que Windows considera
+    /// actual (la última que empezó a sonar).
+    selected: Option<SessionKey>,
+    /// (posición de la sesión mostrada, cantidad de sesiones).
+    sessions: (usize, usize),
     /// Última carátula, para no decodificarla de nuevo en cada play/pausa.
     cover: Option<Cover>,
+    /// Íconos ya buscados, por id de app (también los que no se encontraron).
+    icons: HashMap<String, Option<AppIcon>>,
     /// HWND guardado como número porque `HWND` no es `Send`.
     hwnd: isize,
 }
@@ -131,55 +159,145 @@ pub fn start(hwnd: HWND) {
 
 fn init(hwnd: isize) -> Result<()> {
     let manager = Manager::RequestAsync()?.join()?;
+    // Otra app empezó a sonar: la isla la sigue, aunque antes se hubiera elegido otra a mano.
     manager.CurrentSessionChanged(&TypedEventHandler::new(|_, _| {
-        on_session_changed();
+        if let Some(w) = lock().as_mut() {
+            w.selected = None;
+        }
+        resubscribe();
+        Ok(())
+    }))?;
+    // Se abrió o cerró una app con música: cambian los puntos y quizá la sesión mostrada.
+    manager.SessionsChanged(&TypedEventHandler::new(|_, _| {
+        resubscribe();
         Ok(())
     }))?;
     *lock() = Some(Watcher {
         manager,
         session: None,
+        session_key: None,
+        selected: None,
+        sessions: (0, 0),
         cover: None,
+        icons: HashMap::new(),
         hwnd,
     });
-    on_session_changed();
+    resubscribe();
     Ok(())
 }
 
-/// Cambió la app que controla la música: movemos las suscripciones a la nueva sesión.
-fn on_session_changed() {
-    {
+fn app_id(session: &Session) -> String {
+    session
+        .SourceAppUserModelId()
+        .map(|id| id.to_string_lossy())
+        .unwrap_or_default()
+}
+
+/// Todas las sesiones de música abiertas, con su clave.
+fn list_sessions(manager: &Manager) -> Vec<(Session, SessionKey)> {
+    let Ok(view) = manager.GetSessions() else {
+        return Vec::new();
+    };
+    let mut out: Vec<(Session, SessionKey)> = Vec::new();
+    for session in view {
+        let id = app_id(&session);
+        let nth = out.iter().filter(|(_, (other, _))| *other == id).count();
+        out.push((session, (id, nth)));
+    }
+    out
+}
+
+/// Elige qué sesión mostrar y, si cambió, mueve las suscripciones a ella.
+fn resubscribe() {
+    let changed = {
         let mut guard = lock();
         let Some(w) = guard.as_mut() else { return };
+        let sessions = list_sessions(&w.manager);
 
-        if let Some((old, [props_token, playback_token, timeline_token])) = w.session.take() {
-            let _ = old.RemoveMediaPropertiesChanged(props_token);
-            let _ = old.RemovePlaybackInfoChanged(playback_token);
-            let _ = old.RemoveTimelinePropertiesChanged(timeline_token);
+        // La elegida a mano si sigue abierta; si no, la actual de Windows; si no, la primera.
+        let chosen = w
+            .selected
+            .as_ref()
+            .and_then(|sel| sessions.iter().find(|(_, key)| key == sel))
+            .cloned();
+        if chosen.is_none() {
+            w.selected = None;
         }
+        let target = chosen
+            .or_else(|| {
+                let id = app_id(&w.manager.GetCurrentSession().ok()?);
+                sessions.iter().find(|(_, key)| key.0 == id).cloned()
+            })
+            .or_else(|| sessions.first().cloned());
 
-        // Sin sesión (nada suena) la llamada devuelve error y la sesión queda en None.
-        if let Ok(session) = w.manager.GetCurrentSession() {
-            let props_token = session.MediaPropertiesChanged(&TypedEventHandler::new(|_, _| {
-                publish(true);
-                Ok(())
-            }));
-            // Play/pausa no cambia la carátula: se reutiliza la guardada.
-            let playback_token = session.PlaybackInfoChanged(&TypedEventHandler::new(|_, _| {
-                publish(false);
-                Ok(())
-            }));
-            // Saltos de posición (o el avance que algunas apps informan cada pocos segundos).
-            let timeline_token =
-                session.TimelinePropertiesChanged(&TypedEventHandler::new(|_, _| {
-                    publish(false);
-                    Ok(())
-                }));
-            if let (Ok(a), Ok(b), Ok(c)) = (props_token, playback_token, timeline_token) {
-                w.session = Some((session, [a, b, c]));
+        let index = target
+            .as_ref()
+            .and_then(|(_, key)| sessions.iter().position(|(_, other)| other == key))
+            .unwrap_or(0);
+        w.sessions = (index, sessions.len());
+
+        let key = target.as_ref().map(|(_, key)| key.clone());
+        if key == w.session_key && target.is_some() == w.session.is_some() {
+            false
+        } else {
+            if let Some((old, [props_token, playback_token, timeline_token])) = w.session.take() {
+                let _ = old.RemoveMediaPropertiesChanged(props_token);
+                let _ = old.RemovePlaybackInfoChanged(playback_token);
+                let _ = old.RemoveTimelinePropertiesChanged(timeline_token);
             }
+            w.session = target.and_then(|(session, _)| subscribe(session));
+            w.session_key = key;
+            true
         }
+    };
+    // Si no cambió la sesión, igual se publica: puede haber cambiado la cantidad de apps.
+    publish(changed);
+}
+
+fn subscribe(session: Session) -> Option<(Session, [i64; 3])> {
+    let props_token = session.MediaPropertiesChanged(&TypedEventHandler::new(|_, _| {
+        publish(true);
+        Ok(())
+    }));
+    // Play/pausa no cambia la carátula: se reutiliza la guardada.
+    let playback_token = session.PlaybackInfoChanged(&TypedEventHandler::new(|_, _| {
+        publish(false);
+        Ok(())
+    }));
+    // Saltos de posición (o el avance que algunas apps informan cada pocos segundos).
+    let timeline_token = session.TimelinePropertiesChanged(&TypedEventHandler::new(|_, _| {
+        publish(false);
+        Ok(())
+    }));
+    match (props_token, playback_token, timeline_token) {
+        (Ok(a), Ok(b), Ok(c)) => Some((session, [a, b, c])),
+        _ => None,
     }
-    publish(true);
+}
+
+/// Clic en la carátula: pasa a la siguiente app con música. Corre en otro hilo porque leer
+/// la sesión nueva espera respuestas de WinRT y no debe trabar la ventana.
+pub fn next_session() {
+    std::thread::spawn(|| {
+        {
+            let mut guard = lock();
+            let Some(w) = guard.as_mut() else { return };
+            let keys: Vec<SessionKey> = list_sessions(&w.manager)
+                .into_iter()
+                .map(|(_, key)| key)
+                .collect();
+            if keys.len() < 2 {
+                return;
+            }
+            let next = w
+                .session_key
+                .as_ref()
+                .and_then(|current| keys.iter().position(|key| key == current))
+                .map_or(0, |i| (i + 1) % keys.len());
+            w.selected = Some(keys[next].clone());
+        }
+        resubscribe();
+    });
 }
 
 /// Envía la orden de un botón a la app que suena. No espera la respuesta: el nuevo estado
@@ -216,20 +334,40 @@ pub fn seek(fraction: f32) {
 /// Lee el estado de la sesión actual y lo manda a la ventana.
 /// `refresh_cover` = volver a decodificar la carátula (cambió la canción o la sesión).
 fn publish(refresh_cover: bool) {
-    let (session, hwnd, cached) = {
+    let (session, hwnd, cached, sessions, id, icon) = {
         let guard = lock();
         let Some(w) = guard.as_ref() else { return };
+        let id = w.session_key.as_ref().map(|key| key.0.clone());
+        let icon = id.as_ref().and_then(|id| w.icons.get(id).cloned());
         (
             w.session.as_ref().map(|s| s.0.clone()),
             w.hwnd,
             w.cover.clone(),
+            w.sessions,
+            id,
+            icon,
         )
     };
-    let info = session.and_then(|s| read(&s, refresh_cover, cached).ok());
+    let mut info = session.and_then(|s| read(&s, refresh_cover, cached).ok());
     if refresh_cover || info.is_none() {
         if let Some(w) = lock().as_mut() {
             w.cover = info.as_ref().and_then(|i| i.cover.clone());
         }
+    }
+    if let Some(info) = info.as_mut() {
+        info.sessions = sessions;
+        info.app_icon = match (icon, id) {
+            (Some(cached), _) => cached,
+            // Primera vez que suena esta app: se busca su ícono y se guarda (aunque no exista).
+            (None, Some(id)) if !id.is_empty() => {
+                let loaded = appicon::load(&id).map(|p| AppIcon(Arc::new(p)));
+                if let Some(w) = lock().as_mut() {
+                    w.icons.insert(id, loaded.clone());
+                }
+                loaded
+            }
+            _ => None,
+        };
     }
     post(hwnd, info);
 }
@@ -249,6 +387,9 @@ fn read(session: &Session, refresh_cover: bool, cached: Option<Cover>) -> Result
         playing,
         cover,
         timeline: read_timeline(session, playing).ok().flatten(),
+        // Los completa `publish`, que sabe qué sesión es y cuántas hay.
+        app_icon: None,
+        sessions: (0, 0),
     })
 }
 

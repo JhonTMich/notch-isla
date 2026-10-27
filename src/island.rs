@@ -61,6 +61,8 @@ pub enum Hit {
     Button(Button),
     /// Sobre la barra de progreso, en esa fracción (0 a 1) de la canción.
     Seek(f32),
+    /// Sobre la carátula, con varias apps sonando: un clic pasa a la siguiente.
+    Cover,
 }
 
 /// Estado de la reproducción; `None` en `draw` = no hay música (sin botones ni indicador).
@@ -76,6 +78,11 @@ pub struct Controls {
     /// Nivel de volumen (0 a 1) mientras se está cambiando con la rueda: la barra lo muestra
     /// en blanco en lugar del avance.
     pub volume: Option<f32>,
+    /// (posición de la app mostrada, cantidad de apps con música): con 2 o más se dibujan
+    /// puntos bajo la carátula.
+    pub sessions: (usize, usize),
+    /// El mouse está sobre la carátula y hay otra app a la que cambiar (se aclara).
+    pub cover_hovered: bool,
 }
 
 /// Hasta qué progreso de expansión se ve el indicador de la isla contraída.
@@ -116,6 +123,16 @@ impl Geometry {
     /// Centro vertical de la fila de contenido expandida (deja libre la franja de la barra).
     fn row_cy(&self) -> f32 {
         self.y0 + self.h.min(ROW_H * self.scale) / 2.0
+    }
+
+    /// Carátula de la isla expandida: (x, y, lado).
+    fn cover_rect(&self) -> (f32, f32, f32) {
+        let size = COVER.1 * self.scale;
+        (
+            self.x0 + COVER.0 * self.scale,
+            self.row_cy() - size / 2.0,
+            size,
+        )
     }
 
     /// Barra de progreso: (x, centro vertical, ancho).
@@ -177,7 +194,7 @@ fn button_centers(g: &Geometry, s: f32) -> [(Button, f32, f32); 3] {
 }
 
 /// Qué hay bajo el punto (x, y) de la ventana, solo si el contenido ya se ve por completo.
-/// `seekable` = la barra de progreso está visible.
+/// `seekable` = la barra de progreso está visible; `switchable` = hay otra app a la que cambiar.
 #[allow(clippy::too_many_arguments)]
 pub fn hit_test(
     max_w: f32,
@@ -186,12 +203,19 @@ pub fn hit_test(
     p: f32,
     presence: f32,
     seekable: bool,
+    switchable: bool,
     x: f32,
     y: f32,
 ) -> Option<Hit> {
     let g = geometry(max_w, max_h, scale, p, presence);
     if g.alpha < 1.0 {
         return None;
+    }
+    if switchable {
+        let (cx, cy, size) = g.cover_rect();
+        if x >= cx && x <= cx + size && y >= cy && y <= cy + size {
+            return Some(Hit::Cover);
+        }
     }
     if seekable {
         let (bx, by, bw) = g.progress_bar();
@@ -218,6 +242,7 @@ pub fn draw(
     presence: f32,
     controls: Option<Controls>,
     cover: Option<&Pixmap>,
+    app_icon: Option<&Pixmap>,
     t: f32,
 ) -> Option<TextArea> {
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
@@ -261,16 +286,23 @@ pub fn draw(
         return None;
     }
 
-    let size = COVER.1 * s;
-    draw_cover(
-        pixmap,
-        cover,
-        g.x0 + COVER.0 * s,
-        g.row_cy() - size / 2.0,
-        size,
-        COVER.2 * s,
-        g.alpha,
-    );
+    let (cover_x, cover_y, size) = g.cover_rect();
+    draw_cover(pixmap, cover, cover_x, cover_y, size, COVER.2 * s, g.alpha);
+
+    if let Some(c) = &controls {
+        let (index, count) = c.sessions;
+        if c.cover_hovered && count > 1 {
+            // Se aclara al pasar el mouse: indica que con un clic cambia de app.
+            paint.set_color_rgba8(255, 255, 255, (g.alpha * 40.0) as u8);
+            fill_rounded_rect(pixmap, &paint, cover_x, cover_y, size, size, COVER.2 * s);
+        }
+        if let Some(icon) = app_icon {
+            draw_app_badge(pixmap, icon, cover_x + size, cover_y + size, s, g.alpha);
+        }
+        if count > 1 {
+            draw_session_dots(pixmap, &g, index, count);
+        }
+    }
 
     if let Some(c) = controls {
         for (button, cx, cy) in button_centers(&g, s) {
@@ -291,6 +323,47 @@ pub fn draw(
         cy: g.row_cy(),
         alpha: g.alpha,
     })
+}
+
+/// Insignia con el ícono de la app, montada sobre la esquina inferior derecha de la carátula
+/// (`(x, y)` = esa esquina). Un marco negro la separa de la imagen.
+fn draw_app_badge(pixmap: &mut Pixmap, icon: &Pixmap, x: f32, y: f32, s: f32, alpha: f32) {
+    let (frame, inner) = (18.0 * s, 14.0 * s);
+    let (fx, fy) = (x - frame + 5.0 * s, y - frame + 5.0 * s);
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(0, 0, 0, (alpha * 255.0) as u8);
+    fill_rounded_rect(pixmap, &paint, fx, fy, frame, frame, 5.0 * s);
+    let pad = (frame - inner) / 2.0;
+    draw_cover(
+        pixmap,
+        Some(icon),
+        fx + pad,
+        fy + pad,
+        inner,
+        3.5 * s,
+        alpha,
+    );
+}
+
+/// Puntos bajo la carátula: uno por app con música; el de la mostrada, blanco.
+fn draw_session_dots(pixmap: &mut Pixmap, g: &Geometry, index: usize, count: usize) {
+    let s = g.scale;
+    let (cover_x, cover_y, size) = g.cover_rect();
+    let (r, gap) = (1.5 * s, 6.0 * s);
+    let cy = cover_y + size + 5.0 * s;
+    let first = cover_x + size / 2.0 - gap * (count - 1) as f32 / 2.0;
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    for i in 0..count {
+        let a = if i == index { 255.0 } else { 90.0 };
+        paint.set_color_rgba8(255, 255, 255, (g.alpha * a) as u8);
+        fill_circle(pixmap, &paint, first + gap * i as f32, cy, r);
+    }
 }
 
 /// Barra inferior: pista gris tenue y el nivel `fraction` en `color` (avance de la canción con

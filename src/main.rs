@@ -1,6 +1,7 @@
 // En release no se abre consola; en debug sí, para ver mensajes.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appicon;
 mod audio;
 mod autostart;
 mod fullscreen;
@@ -177,6 +178,8 @@ struct App {
     hovered_button: Option<Button>,
     /// El mouse está sobre la barra de progreso.
     seek_hovered: bool,
+    /// El mouse está sobre la carátula y se puede cambiar de app.
+    cover_hovered: bool,
     tray: Tray,
     /// Inicio del desplazamiento de textos largos; se reinicia al expandir o cambiar de canción.
     scroll_start: Instant,
@@ -214,6 +217,7 @@ impl App {
             media: None,
             hovered_button: None,
             seek_hovered: false,
+            cover_hovered: false,
             tray: Tray::new(hwnd),
             scroll_start: Instant::now(),
             fullscreen: false,
@@ -302,6 +306,7 @@ impl App {
             self.hovered = false;
             self.hovered_button = None;
             self.seek_hovered = false;
+            self.cover_hovered = false;
             self.spring.set_target(0.0);
         }
         self.start_animation();
@@ -326,6 +331,7 @@ impl App {
             self.presence.value,
             // Mientras se muestra el volumen, la barra no sirve para saltar.
             media.timeline.is_some() && !self.volume_showing(),
+            media.sessions.1 > 1,
             x,
             y,
         )
@@ -337,11 +343,14 @@ impl App {
             _ => None,
         };
         let seek = matches!(hit, Some(Hit::Seek(_)));
-        if self.hovered_button == button && self.seek_hovered == seek {
+        let cover = hit == Some(Hit::Cover);
+        if self.hovered_button == button && self.seek_hovered == seek && self.cover_hovered == cover
+        {
             return;
         }
         self.hovered_button = button;
         self.seek_hovered = seek;
+        self.cover_hovered = cover;
         self.redraw();
     }
 
@@ -452,6 +461,8 @@ impl App {
             accent: cover.map_or([255, 255, 255], |c| c.accent),
             progress: m.timeline.map(|t| t.progress(m.playing)),
             volume,
+            sessions: m.sessions,
+            cover_hovered: self.cover_hovered,
         });
         let playing = self.visible && self.media.as_ref().is_some_and(|m| m.playing);
         let bars = playing && island::mini_alpha(self.spring.value) > 0.0;
@@ -468,6 +479,9 @@ impl App {
             self.presence.value,
             controls,
             cover.map(|c| c.image.as_ref()),
+            media
+                .and_then(|m| m.app_icon.as_ref())
+                .map(|i| i.0.as_ref()),
             self.started.elapsed().as_secs_f32(),
         );
         self.surface.copy_to_dib();
@@ -696,6 +710,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_app(|app| match app.hit_at(x, y) {
                 Some(Hit::Button(button)) => media::press(button),
                 Some(Hit::Seek(fraction)) => app.seek(fraction),
+                Some(Hit::Cover) => media::next_session(),
                 None => {}
             });
             LRESULT(0)
