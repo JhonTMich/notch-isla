@@ -40,6 +40,7 @@ const CMD_HOTKEY_CHANGE: usize = 8;
 const CMD_HOTKEY_DEFAULT: usize = 9;
 const CMD_HOTKEY_OFF: usize = 10;
 const CMD_REAL_BARS: usize = 11;
+const CMD_CHECK_UPDATES: usize = 12;
 /// Las opciones de los submenús van numeradas a partir de estas bases.
 const CMD_HIDE_DELAY: usize = 100;
 const CMD_MONITOR: usize = 200;
@@ -66,6 +67,7 @@ pub enum Command {
     ToggleFullscreen,
     ToggleLyrics,
     ToggleRealBars,
+    CheckUpdates,
     /// Escuchar la próxima combinación de teclas como atajo nuevo.
     ChangeHotkey,
     /// Atajo elegido: el de siempre, o `None` para desactivarlo.
@@ -274,6 +276,8 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
         ],
     });
     items.push(Item::Separator);
+    // Con una versión nueva ya encontrada, la opción de arriba la instala; esta igual consulta.
+    items.push(action(CMD_CHECK_UPDATES, "Buscar actualizaciones", false));
     items.push(action(CMD_EXIT, "Salir", false));
 
     let id = menu::show(items)?;
@@ -287,6 +291,7 @@ pub fn show_menu(state: &MenuState) -> Option<Command> {
         CMD_CANCEL_TIMER => Some(Command::CancelTimer),
         CMD_LYRICS => Some(Command::ToggleLyrics),
         CMD_REAL_BARS => Some(Command::ToggleRealBars),
+        CMD_CHECK_UPDATES => Some(Command::CheckUpdates),
         CMD_HOTKEY_CHANGE => Some(Command::ChangeHotkey),
         CMD_HOTKEY_DEFAULT => Some(Command::SetHotkey(Some(hotkey::DEFAULT))),
         CMD_HOTKEY_OFF => Some(Command::SetHotkey(None)),

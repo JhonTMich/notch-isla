@@ -525,6 +525,46 @@ impl App {
         }
     }
 
+    /// "Buscar actualizaciones": avisa que está buscando y consulta GitHub en otro hilo (el
+    /// resultado llega con `WM_UPDATE` o `WM_UPDATE_CHECKED`).
+    fn check_updates_now(&mut self) {
+        self.announce(
+            Notice {
+                icon: NoticeIcon::Installing,
+                color: BLUE,
+            },
+            "Buscando actualizaciones",
+            "Un momento...",
+            NOTICE_UPDATE_MS,
+        );
+        update::check_now(self.hwnd);
+    }
+
+    /// Resultado de "Buscar actualizaciones" cuando no hay versión nueva.
+    fn update_checked(&mut self, failed: bool) {
+        if failed {
+            self.announce(
+                Notice {
+                    icon: NoticeIcon::Failed,
+                    color: RED,
+                },
+                "No se pudo buscar actualizaciones",
+                "Revisa tu conexión a internet",
+                NOTICE_UPDATE_MS,
+            );
+        } else {
+            self.announce(
+                Notice {
+                    icon: NoticeIcon::Done,
+                    color: GREEN,
+                },
+                "Notch Isla está al día",
+                &format!("Tienes la última versión ({})", env!("CARGO_PKG_VERSION")),
+                NOTICE_MS + 1000,
+            );
+        }
+    }
+
     /// Aviso en la isla o, si no puede mostrarse (pantalla completa), notificación de Windows.
     fn announce(&mut self, view: Notice, title: &str, subtitle: &str, ms: u32) {
         if self.hidden_by_fullscreen() {
@@ -1584,9 +1624,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         update::WM_UPDATE => {
             let found = unsafe { update::take(lparam) };
+            // wparam 1 = la pidió "Buscar actualizaciones": se avisa en la isla.
+            let manual = wparam.0 == 1;
             with_app(|app| {
                 let version = &found.version;
-                if found.installer.is_some() {
+                if manual {
+                    let subtitle = if found.installer.is_some() {
+                        "Haz clic en el punto azul para instalarla"
+                    } else {
+                        "Descárgala desde el menú de la bandeja"
+                    };
+                    app.announce(
+                        Notice {
+                            icon: NoticeIcon::Installing,
+                            color: BLUE,
+                        },
+                        &format!("Versión {version} disponible"),
+                        subtitle,
+                        NOTICE_UPDATE_MS,
+                    );
+                } else if found.installer.is_some() {
                     app.tray.notify(
                         &format!("Notch Isla {version} lista para instalar"),
                         "Haz clic aquí para actualizar. La isla se cierra y vuelve en unos segundos.",
@@ -1601,6 +1658,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 // Aparece el punto azul en la isla.
                 app.redraw();
             });
+            LRESULT(0)
+        }
+        update::WM_UPDATE_CHECKED => {
+            let failed = wparam.0 == 1;
+            with_app(|app| app.update_checked(failed));
             LRESULT(0)
         }
         // Clic derecho sobre el ícono de la bandeja: menú. El evento real va en la parte baja de lparam.
@@ -1644,6 +1706,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     Some(Command::ChangeHotkey) => {
                         with_app(|app| app.begin_hotkey_capture());
+                    }
+                    Some(Command::CheckUpdates) => {
+                        with_app(|app| app.check_updates_now());
                     }
                     Some(command) => {
                         match command {

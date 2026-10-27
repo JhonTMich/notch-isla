@@ -98,19 +98,60 @@ pub fn start(hwnd: HWND) {
 /// Busca una versión más nueva que `current` (y distinta de la ya avisada) y, si la app está
 /// instalada, descarga su instalador.
 fn check(current: &str, notified: Option<&str>) -> Option<Update> {
-    let json = String::from_utf8(get(API_HOST, API_PATH, true)?).ok()?;
-    let tag = json_string(&json, "tag_name")?;
+    match lookup(current) {
+        // Se avisa una sola vez por versión.
+        Ok(Some(update)) if notified != Some(update.version.as_str()) => Some(update),
+        _ => None,
+    }
+}
+
+/// Consulta el último release: `Ok(Some)` si hay una versión más nueva que `current` (con su
+/// instalador descargado si la app está instalada), `Ok(None)` si ya es la última, `Err` si
+/// no se pudo consultar (sin internet, GitHub no responde...).
+fn lookup(current: &str) -> std::result::Result<Option<Update>, ()> {
+    let json = get(API_HOST, API_PATH, true)
+        .and_then(|body| String::from_utf8(body).ok())
+        .ok_or(())?;
+    let tag = json_string(&json, "tag_name").ok_or(())?;
     let version = tag.trim_start_matches('v').to_string();
-    // Se avisa una sola vez por versión.
-    if !is_newer(&version, current) || notified == Some(version.as_str()) {
-        return None;
+    if !is_newer(&version, current) {
+        return Ok(None);
     }
     let installer = if is_installed() {
         download_installer(&json, tag, &version)
     } else {
         None
     };
-    Some(Update { version, installer })
+    Ok(Some(Update { version, installer }))
+}
+
+/// Mensaje con el resultado de "Buscar actualizaciones" cuando no hay versión nueva:
+/// `wparam` = 0 si ya es la última, 1 si no se pudo consultar. Si la hay, llega `WM_UPDATE`
+/// con `wparam` = 1 (pedida a mano).
+pub const WM_UPDATE_CHECKED: u32 = WM_APP + 8;
+
+/// "Buscar actualizaciones" de la bandeja: consulta ya, en otro hilo, y avisa el resultado.
+pub fn check_now(hwnd: HWND) {
+    let hwnd = hwnd.0 as usize;
+    std::thread::spawn(move || {
+        let target = Some(HWND(hwnd as _));
+        unsafe {
+            match lookup(&current_version()) {
+                Ok(Some(update)) => {
+                    let ptr = Box::into_raw(Box::new(update));
+                    if PostMessageW(target, WM_UPDATE, WPARAM(1), LPARAM(ptr as isize)).is_err() {
+                        drop(Box::from_raw(ptr));
+                    }
+                }
+                Ok(None) => {
+                    let _ = PostMessageW(target, WM_UPDATE_CHECKED, WPARAM(0), LPARAM(0));
+                }
+                Err(()) => {
+                    let _ = PostMessageW(target, WM_UPDATE_CHECKED, WPARAM(1), LPARAM(0));
+                }
+            }
+        }
+    });
 }
 
 /// Versión de esta app. En debug se puede fingir otra con la variable NOTCH_ISLA_VERSION
