@@ -1,0 +1,2 @@
+// Recursos del ejecutable. El ícono se genera con `cargo run --example icon`.
+1 ICON "assets/icon.ico"

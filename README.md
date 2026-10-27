@@ -27,6 +27,12 @@ cargo run --release  # versión optimizada, sin consola
 
 El ejecutable final queda en `target\release\notch-isla.exe`.
 
+El ícono (`assets/icon.ico`) se dibuja por código y se incrusta en el `.exe` al compilar (`build.rs` + `app.rc`, con el `rc.exe` del Windows SDK). Para regenerarlo después de cambiar el diseño en `examples/icon.rs`:
+
+```powershell
+cargo run --example icon
+```
+
 **Uso:**
 
 - La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
