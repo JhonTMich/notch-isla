@@ -49,6 +49,7 @@ cargo run --example icon
 **Uso:**
 
 - La isla aparece cuando alguna app reproduce música y se oculta si no hay nada o si una app está a pantalla completa.
+- Si no la usas, a los 3 s sube y se oculta para no tapar lo que hay debajo (pestañas del navegador, etc.). Queda una línea fina en el borde superior, con el avance de la canción en el color de la carátula; lleva el mouse a esa línea para traer la isla de vuelta.
 - Es una píldora flotante arriba al centro. Contraída muestra una mini carátula y barras de audio (con el color de la carátula) que se mueven mientras suena la música.
 - Pasa el mouse sobre la píldora para expandirla: en una sola fila, carátula, título, artista y los botones anterior / play-pausa / siguiente.
 - En la esquina de la carátula, el ícono de la app que suena (Spotify, Chrome...). Si hay varias apps con música, unos puntos bajo la carátula lo indican y un clic en ella pasa a la siguiente.
@@ -56,6 +57,7 @@ cargo run --example icon
 - Gira la rueda del mouse sobre la isla para subir o bajar el volumen de Windows; la barra muestra el nivel un momento.
 - Si el título o el artista no caben, se desplazan de un lado al otro.
 - Clic derecho en el ícono de la bandeja: **Iniciar con Windows** y **Salir**.
+- Al minuto de abrirse y luego una vez al día, consulta en GitHub si hay una versión nueva. Si la hay, muestra un aviso (clic para ir a la descarga) y agrega **Descargar la versión X** al menú de la bandeja. Ver [PRIVACY.md](PRIVACY.md).
 
 ## Cómo está hecha
 
@@ -79,6 +81,7 @@ src/
 ├─ tray.rs        ícono en la bandeja y su menú
 ├─ audio.rs       volumen general con Core Audio (rueda del mouse)
 ├─ autostart.rs   iniciar con Windows (clave Run del usuario)
+├─ update.rs      aviso de actualizaciones (último release en GitHub, con WinHTTP)
 └─ fullscreen.rs  ocultar la isla cuando una app está a pantalla completa
 ```
 

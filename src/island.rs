@@ -50,6 +50,45 @@ pub fn window_size() -> (f32, f32) {
     )
 }
 
+/// Alto de la línea de tiempo que queda pegada al borde superior cuando la isla se oculta sola.
+const EDGE_STRIP_H: f32 = 3.0;
+
+/// Ancho en píxeles físicos de la línea del borde (el de la isla contraída).
+pub fn edge_strip_width(scale: f32) -> f32 {
+    COLLAPSED.0 * scale
+}
+
+/// Línea de tiempo en el borde superior, donde estaba la isla contraída: indica que la isla
+/// sigue ahí y tocarla con el mouse la hace volver (ningún píxel queda con alfa 0, así que
+/// recibe el mouse en todo su ancho). `progress`: avance de la canción, si la app lo informa.
+pub fn draw_edge_strip(pixmap: &mut Pixmap, scale: f32, progress: Option<f32>, accent: [u8; 3]) {
+    let w = edge_strip_width(scale);
+    let x = (pixmap.width() as f32 - w) / 2.0;
+    let h = (EDGE_STRIP_H * scale).round().max(2.0);
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    // Pista oscura semitransparente: se distingue sobre fondos claros y oscuros.
+    paint.set_color_rgba8(0, 0, 0, 170);
+    fill_rounded_rect(pixmap, &paint, x, 0.0, w, h, h / 2.0);
+    let [r, g, b] = accent;
+    match progress {
+        Some(fraction) => {
+            let filled = w * fraction.clamp(0.0, 1.0);
+            if filled >= 1.0 {
+                paint.set_color_rgba8(r, g, b, 255);
+                fill_rounded_rect(pixmap, &paint, x, 0.0, filled, h, h / 2.0);
+            }
+        }
+        // Sin tiempo informado: toda la línea con el color, más tenue.
+        None => {
+            paint.set_color_rgba8(r, g, b, 140);
+            fill_rounded_rect(pixmap, &paint, x, 0.0, w, h, h / 2.0);
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Button {
     Prev,
@@ -85,6 +124,17 @@ pub struct Controls {
     pub sessions: (usize, usize),
     /// El mouse está sobre la carátula y hay otra app a la que cambiar (se aclara).
     pub cover_hovered: bool,
+    /// Botón recién pulsado y avance de su animación (0 a 1).
+    pub pressed: Option<(Button, f32)>,
+}
+
+/// Duración de la animación al pulsar un botón.
+pub const PRESS_SECS: f32 = 0.35;
+
+/// Tamaño del ícono pulsado: se encoge al 80 %, rebota un poco por encima y se asienta.
+fn press_scale(t: f32) -> f32 {
+    let u = t.clamp(0.0, 1.0);
+    1.0 - 0.2 * (1.0 - u).powi(2) * (3.0 * std::f32::consts::PI * u).cos()
 }
 
 /// Hasta qué progreso de expansión se ve el indicador de la isla contraída.
@@ -308,7 +358,24 @@ pub fn draw(
 
     if let Some(c) = controls {
         for (button, cx, cy) in button_centers(&g, s) {
-            draw_button(pixmap, button, &c, cx, cy, s, g.alpha);
+            match c.pressed {
+                Some((pressed, t)) if pressed == button => {
+                    // Onda que se expande y se desvanece detrás del botón.
+                    paint.set_color_rgba8(255, 255, 255, (g.alpha * 70.0 * (1.0 - t)) as u8);
+                    fill_circle(pixmap, &paint, cx, cy, BUTTON_RADIUS * s * (0.9 + 0.6 * t));
+                    // Anterior y siguiente se empujan hacia su lado.
+                    let dir = match button {
+                        Button::Prev => -1.0,
+                        Button::Next => 1.0,
+                        Button::PlayPause => 0.0,
+                    };
+                    let nudge = dir * 4.0 * s * (std::f32::consts::PI * t).sin();
+                    // Los tamaños del botón salen de `s`: escalarlo encoge el ícono en su centro.
+                    let k = press_scale(t);
+                    draw_button(pixmap, button, &c, cx + nudge, cy, s * k, g.alpha);
+                }
+                _ => draw_button(pixmap, button, &c, cx, cy, s, g.alpha),
+            }
         }
         match (c.volume, c.progress) {
             (Some(volume), _) => draw_progress(pixmap, &g, false, volume, [255, 255, 255]),

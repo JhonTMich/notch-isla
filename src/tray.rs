@@ -1,15 +1,17 @@
-//! Ícono en la bandeja del sistema y su menú (iniciar con Windows, salir).
+//! Ícono en la bandeja del sistema, su menú (iniciar con Windows, actualización, salir)
+//! y el aviso de versión nueva.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use windows::core::{w, Result};
+use windows::core::{w, Result, HSTRING};
 use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     DIB_RGB_COLORS,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER,
+    NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
@@ -26,9 +28,11 @@ const TRAY_ID: u32 = 1;
 
 const CMD_AUTOSTART: usize = 1;
 const CMD_EXIT: usize = 2;
+const CMD_UPDATE: usize = 3;
 
 pub enum Command {
     ToggleAutostart,
+    Download,
     Exit,
 }
 
@@ -83,6 +87,23 @@ impl Tray {
         }
     }
 
+    /// Globo de Windows junto al ícono (en Windows 10/11 aparece como notificación).
+    pub fn notify(&self, title: &str, text: &str) {
+        let mut data = self.data();
+        data.uFlags |= NIF_INFO;
+        // Con el ícono de la app (el de la bandeja).
+        data.dwInfoFlags = NIIF_USER;
+        for (dst, src) in data.szInfoTitle[..63].iter_mut().zip(title.encode_utf16()) {
+            *dst = src;
+        }
+        for (dst, src) in data.szInfo[..255].iter_mut().zip(text.encode_utf16()) {
+            *dst = src;
+        }
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+        }
+    }
+
     pub fn remove(&self) {
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.data());
@@ -102,9 +123,15 @@ impl Drop for Tray {
 ///
 /// No recibe `&Tray` a propósito: el menú corre su propio bucle de mensajes y la ventana
 /// sigue recibiendo mensajes mientras está abierto (no debe haber un préstamo de la app activo).
-pub fn show_menu(hwnd: HWND) -> Option<Command> {
+/// `update`: versión nueva disponible, si la hay; agrega arriba la opción para descargarla.
+pub fn show_menu(hwnd: HWND, update: Option<&str>) -> Option<Command> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
+        if let Some(version) = update {
+            let label = HSTRING::from(format!("Descargar la versión {version}"));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, &label);
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        }
         let autostart_flags = if autostart::is_enabled() {
             MF_STRING | MF_CHECKED
         } else {
@@ -137,6 +164,7 @@ pub fn show_menu(hwnd: HWND) -> Option<Command> {
 
         match cmd.0 as usize {
             CMD_AUTOSTART => Some(Command::ToggleAutostart),
+            CMD_UPDATE => Some(Command::Download),
             CMD_EXIT => Some(Command::Exit),
             _ => None,
         }

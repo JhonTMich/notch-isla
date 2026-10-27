@@ -1,6 +1,6 @@
 [package]
 name = "notch-isla"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/gportal21/notch-isla"
@@ -43,6 +43,8 @@ features = [
     # Ícono de la app que suena: buscar su proceso y su .exe.
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Variant",
+    # Aviso de actualizaciones: consulta el último release en GitHub.
+    "Win32_Networking_WinHttp",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

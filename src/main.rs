@@ -10,6 +10,7 @@ mod media;
 mod spring;
 mod text;
 mod tray;
+mod update;
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
@@ -39,6 +40,7 @@ use windows::Win32::UI::HiDpi::{
     MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
     LoadCursorW, PostQuitMessage, RegisterClassExW, SetTimer, ShowWindow, TranslateMessage,
@@ -52,6 +54,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const ANIM_TIMER: usize = 1;
+/// Temporizador de un solo disparo: oculta la isla tras un rato sin usarla.
+const IDLE_TIMER: usize = 2;
+/// Cuánto espera la isla, sin el mouse encima, antes de ocultarse en el borde superior.
+const IDLE_HIDE_MS: u32 = 3000;
 /// ~60 fps. El temporizador solo existe mientras hay animación: en reposo la CPU queda en 0%.
 const FRAME_MS: u32 = 15;
 /// ~30 fps para las barras de audio de la isla contraída: se ven fluidas y cuestan la mitad.
@@ -72,6 +78,10 @@ struct Motion {
     bars: bool,
     /// La barra de progreso avanza (isla expandida y música sonando).
     progress: bool,
+    /// La línea de tiempo del borde avanza (isla oculta): cada cuántos ms crece un píxel.
+    edge_ms: Option<u32>,
+    /// Un botón está en su animación de pulsado.
+    pressing: bool,
 }
 
 fn main() -> Result<()> {
@@ -128,6 +138,7 @@ fn main() -> Result<()> {
         // La ventana empieza oculta: aparece cuando SMTC reporte música (ver `update_visibility`).
         media::start(hwnd);
         fullscreen::register(hwnd);
+        update::start(hwnd);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -198,6 +209,12 @@ struct App {
     volume_level: f32,
     /// Hasta cuándo se muestra el nivel de volumen en la isla.
     volume_until: Option<Instant>,
+    /// Versión nueva publicada en GitHub, si la hay (se ofrece en el menú de la bandeja).
+    update: Option<String>,
+    /// Se ocultó sola por no usarse; vuelve al tocar el borde superior con el mouse.
+    idle_hidden: bool,
+    /// Botón recién pulsado y cuándo, para su animación.
+    pressed: Option<(Button, Instant)>,
 }
 
 impl App {
@@ -228,7 +245,55 @@ impl App {
             volume: None,
             volume_level: 0.0,
             volume_until: None,
+            update: None,
+            idle_hidden: false,
+            pressed: None,
         })
+    }
+
+    /// Clic en un botón: manda la orden a la app y anima el botón.
+    fn press(&mut self, button: Button) {
+        media::press(button);
+        self.pressed = Some((button, Instant::now()));
+        self.start_animation();
+    }
+
+    /// Oculta, queda la franja del borde superior (hay música, pero la isla se ocultó sola).
+    fn edge_strip(&self) -> bool {
+        self.idle_hidden && self.media.is_some() && !self.fullscreen
+    }
+
+    /// (Re)inicia la cuenta para ocultarse; se cancela mientras el mouse esté encima.
+    fn start_idle_countdown(&mut self) {
+        unsafe {
+            SetTimer(Some(self.hwnd), IDLE_TIMER, IDLE_HIDE_MS, None);
+        }
+    }
+
+    fn stop_idle_countdown(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), IDLE_TIMER);
+        }
+    }
+
+    /// Se acabó la espera sin usarla: sube y deja solo la franja del borde.
+    fn idle_hide(&mut self) {
+        self.stop_idle_countdown();
+        if self.hovered || !self.visible {
+            return;
+        }
+        self.idle_hidden = true;
+        self.update_visibility();
+    }
+
+    /// El mouse tocó la franja del borde: la isla baja (contraída) y vuelve a contar.
+    fn reveal(&mut self) {
+        if !self.idle_hidden {
+            return;
+        }
+        self.idle_hidden = false;
+        self.update_visibility();
+        self.start_idle_countdown();
     }
 
     fn volume_showing(&self) -> bool {
@@ -283,9 +348,24 @@ impl App {
         self.timer_ms = ms;
     }
 
-    /// La isla se muestra solo si hay música y nada está a pantalla completa.
+    /// La isla se muestra solo si hay música, nada está a pantalla completa y no se ocultó sola.
     fn update_visibility(&mut self) {
-        let want = self.media.is_some() && !self.fullscreen;
+        let want = self.media.is_some() && !self.fullscreen && !self.idle_hidden;
+        // Oculta por inactividad, la ventana sigue mostrada para la franja del borde.
+        if self.edge_strip() && !self.shown {
+            self.render();
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            }
+            self.shown = true;
+        }
+        // Ya no corresponde la franja (pantalla completa) y la isla no está: se oculta la ventana.
+        if !want && !self.visible && self.shown && !self.edge_strip() {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+            self.shown = false;
+        }
         if want == self.visible {
             return;
         }
@@ -300,7 +380,9 @@ impl App {
                 self.shown = true;
             }
             self.presence.set_target(1.0);
+            self.start_idle_countdown();
         } else {
+            self.stop_idle_countdown();
             // Sale hacia arriba y a la vez se contrae; la ventana se oculta al terminar (en `tick`).
             self.presence.set_target(0.0);
             self.hovered = false;
@@ -379,6 +461,9 @@ impl App {
         }
         if media.is_some() {
             self.last_media = media.clone();
+        } else {
+            // Sin música no hay franja; cuando vuelva a sonar algo, la isla aparece un momento.
+            self.idle_hidden = false;
         }
         self.media = media;
         self.update_visibility();
@@ -392,6 +477,7 @@ impl App {
         }
         self.hovered = hovered;
         if hovered {
+            self.stop_idle_countdown();
             // Pide a Windows un aviso (WM_MOUSELEAVE) cuando el mouse salga de la isla.
             let mut tme = TRACKMOUSEEVENT {
                 cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -403,6 +489,8 @@ impl App {
                 let _ = TrackMouseEvent(&mut tme);
             }
             self.scroll_start = Instant::now();
+        } else {
+            self.start_idle_countdown();
         }
         self.spring.set_target(if hovered { 1.0 } else { 0.0 });
         self.start_animation();
@@ -422,8 +510,8 @@ impl App {
         let moving = expanding || entering;
         let motion = self.render();
 
-        // Terminó de salir: ahora sí se oculta la ventana.
-        if !self.visible && !entering && self.shown {
+        // Terminó de salir: ahora sí se oculta la ventana (salvo que deba quedar la franja).
+        if !self.visible && !entering && self.shown && !self.edge_strip() {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
@@ -454,7 +542,15 @@ impl App {
         let media = self.media.as_ref().or(self.last_media.as_ref());
         let cover = media.and_then(|m| m.cover.as_ref());
         let volume = self.volume_showing().then_some(self.volume_level);
+        let pressed = self.pressed.and_then(|(button, at)| {
+            let t = at.elapsed().as_secs_f32() / island::PRESS_SECS;
+            (t < 1.0).then_some((button, t))
+        });
+        if pressed.is_none() {
+            self.pressed = None;
+        }
         let controls = media.map(|m| Controls {
+            pressed,
             playing: m.playing,
             hovered: self.hovered_button,
             seek_hovered: self.seek_hovered,
@@ -484,6 +580,19 @@ impl App {
                 .map(|i| i.0.as_ref()),
             self.started.elapsed().as_secs_f32(),
         );
+        let strip = self.edge_strip();
+        let mut edge_ms = None;
+        if let (true, Some(m)) = (strip, self.media.as_ref()) {
+            let accent = m.cover.as_ref().map_or([255, 255, 255], |c| c.accent);
+            let progress = m.timeline.map(|t| t.progress(m.playing));
+            island::draw_edge_strip(&mut self.surface.pixmap, self.scale, progress, accent);
+            // Se redibuja solo cuando la línea crece un píxel (en pausa, nunca).
+            if let (true, Some(t)) = (m.playing, m.timeline) {
+                let px = island::edge_strip_width(self.scale).max(1.0);
+                let ms = (t.duration * 1000.0 / px) as u32;
+                edge_ms = Some(ms.clamp(PROGRESS_MS, 5000));
+            }
+        }
         self.surface.copy_to_dib();
         let mut scrolling = false;
         if let (Some(area), Some(text)) = (area, self.text.as_mut()) {
@@ -526,11 +635,17 @@ impl App {
             cy: self.surface.height as i32,
         };
         let src = POINT::default();
+        // Opacidad global: la isla se desvanece mientras entra o sale de la pantalla.
+        // Con la línea del borde, opaca: la isla sube sin desvanecerse y la línea queda visible.
+        let opacity = if strip {
+            255
+        } else {
+            (self.presence.value.clamp(0.0, 1.0) * 255.0) as u8
+        };
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
-            // Opacidad global: la isla se desvanece mientras entra o sale de la pantalla.
-            SourceConstantAlpha: (self.presence.value.clamp(0.0, 1.0) * 255.0) as u8,
+            SourceConstantAlpha: opacity,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         unsafe {
@@ -551,22 +666,26 @@ impl App {
             scrolling,
             bars,
             progress,
+            edge_ms,
+            // El último cuadro de la animación se dibuja ya con el botón en reposo.
+            pressing: pressed.is_some(),
         }
     }
 }
 
 /// Intervalo del temporizador según lo que se mueve: 60 fps para la isla y los textos,
-/// 30 fps si solo bailan las barras, 4 fps si solo avanza la barra de progreso, y apagado
-/// si todo está quieto.
+/// 30 fps si solo bailan las barras, 4 fps si solo avanza la barra de progreso, un cuadro por
+/// píxel de avance si la isla está oculta y solo crece la línea del borde, y apagado si todo
+/// está quieto.
 fn timer_for(motion: &Motion, moving: bool) -> Option<u32> {
-    if moving || motion.scrolling {
+    if moving || motion.scrolling || motion.pressing {
         Some(FRAME_MS)
     } else if motion.bars {
         Some(BARS_MS)
     } else if motion.progress {
         Some(PROGRESS_MS)
     } else {
-        None
+        motion.edge_ms
     }
 }
 
@@ -685,6 +804,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_MOUSEMOVE => {
             let (x, y) = mouse_pos(lparam);
             with_app(|app| {
+                // Oculta: el mouse está en la franja del borde (o sobre la isla mientras sube).
+                if app.idle_hidden {
+                    app.reveal();
+                    return;
+                }
                 app.set_hovered(true);
                 let hit = app.hit_at(x, y);
                 app.set_hover(hit);
@@ -708,7 +832,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         WM_LBUTTONUP => {
             let (x, y) = mouse_pos(lparam);
             with_app(|app| match app.hit_at(x, y) {
-                Some(Hit::Button(button)) => media::press(button),
+                Some(Hit::Button(button)) => app.press(button),
                 Some(Hit::Seek(fraction)) => app.seek(fraction),
                 Some(Hit::Cover) => media::next_session(),
                 None => {}
@@ -717,6 +841,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_TIMER if wparam.0 == ANIM_TIMER => {
             with_app(|app| app.tick());
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == IDLE_TIMER => {
+            with_app(|app| app.idle_hide());
             LRESULT(0)
         }
         media::WM_MEDIA => {
@@ -728,14 +856,31 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             with_app(|app| app.relayout());
             LRESULT(0)
         }
+        update::WM_UPDATE => {
+            let version = unsafe { update::take(lparam) };
+            with_app(|app| {
+                app.tray.notify(
+                    &format!("Notch Isla {version} disponible"),
+                    "Haz clic aquí para descargarla, o búscala en el menú del ícono.",
+                );
+                app.update = Some(version);
+            });
+            LRESULT(0)
+        }
         // Clic derecho sobre el ícono de la bandeja: menú. El evento real va en la parte baja de lparam.
         tray::WM_TRAY => {
             let event = (lparam.0 & 0xFFFF) as u32;
-            if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
-                match tray::show_menu(hwnd) {
+            if event == NIN_BALLOONUSERCLICK {
+                update::open_download_page();
+            } else if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
+                // Se copia antes de abrir el menú: mientras está abierto no debe haber préstamo de la app.
+                let mut pending = None;
+                with_app(|app| pending = app.update.clone());
+                match tray::show_menu(hwnd, pending.as_deref()) {
                     Some(tray::Command::ToggleAutostart) => {
                         autostart::set(!autostart::is_enabled())
                     }
+                    Some(tray::Command::Download) => update::open_download_page(),
                     Some(tray::Command::Exit) => unsafe {
                         let _ = DestroyWindow(hwnd);
                     },

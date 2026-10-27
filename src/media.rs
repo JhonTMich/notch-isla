@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tiny_skia::{IntSize, Pixmap};
 use windows::core::{Error, Result};
@@ -136,10 +136,25 @@ struct Watcher {
     /// Última carátula, para no decodificarla de nuevo en cada play/pausa.
     cover: Option<Cover>,
     /// Íconos ya buscados, por id de app (también los que no se encontraron).
-    icons: HashMap<String, Option<AppIcon>>,
+    icons: HashMap<String, IconEntry>,
     /// HWND guardado como número porque `HWND` no es `Send`.
     hwnd: isize,
 }
+
+/// Resultado de buscar el ícono de una app. Si falla se reintenta: justo al iniciar Windows,
+/// o cuando la app recién abre, el shell todavía puede no conocerla.
+enum IconEntry {
+    Found(AppIcon),
+    Missing { attempts: u32, retry_at: Instant },
+}
+
+/// Reintentos tras no encontrar un ícono, con espera creciente (5 s, 10 s, 20 s...).
+const ICON_ATTEMPTS: u32 = 5;
+const ICON_RETRY: Duration = Duration::from_secs(5);
+
+/// Las búsquedas de íconos van de a una: al aparecer una app llegan varios eventos a la vez y
+/// sin esto cada uno buscaría el mismo ícono en paralelo.
+static ICON_LOADING: Mutex<()> = Mutex::new(());
 
 static WATCHER: Mutex<Option<Watcher>> = Mutex::new(None);
 
@@ -334,18 +349,15 @@ pub fn seek(fraction: f32) {
 /// Lee el estado de la sesión actual y lo manda a la ventana.
 /// `refresh_cover` = volver a decodificar la carátula (cambió la canción o la sesión).
 fn publish(refresh_cover: bool) {
-    let (session, hwnd, cached, sessions, id, icon) = {
+    let (session, hwnd, cached, sessions, id) = {
         let guard = lock();
         let Some(w) = guard.as_ref() else { return };
-        let id = w.session_key.as_ref().map(|key| key.0.clone());
-        let icon = id.as_ref().and_then(|id| w.icons.get(id).cloned());
         (
             w.session.as_ref().map(|s| s.0.clone()),
             w.hwnd,
             w.cover.clone(),
             w.sessions,
-            id,
-            icon,
+            w.session_key.as_ref().map(|key| key.0.clone()),
         )
     };
     let mut info = session.and_then(|s| read(&s, refresh_cover, cached).ok());
@@ -356,20 +368,68 @@ fn publish(refresh_cover: bool) {
     }
     if let Some(info) = info.as_mut() {
         info.sessions = sessions;
-        info.app_icon = match (icon, id) {
-            (Some(cached), _) => cached,
-            // Primera vez que suena esta app: se busca su ícono y se guarda (aunque no exista).
-            (None, Some(id)) if !id.is_empty() => {
-                let loaded = appicon::load(&id).map(|p| AppIcon(Arc::new(p)));
-                if let Some(w) = lock().as_mut() {
-                    w.icons.insert(id, loaded.clone());
-                }
-                loaded
-            }
-            _ => None,
-        };
+        info.app_icon = id.as_deref().and_then(app_icon);
     }
     post(hwnd, info);
+}
+
+/// Ícono de la app `id`: el guardado, o lo busca si aún no se buscó o toca reintentar.
+fn app_icon(id: &str) -> Option<AppIcon> {
+    if id.is_empty() {
+        return None;
+    }
+    let cached = |now: Instant| -> Option<Option<AppIcon>> {
+        let guard = lock();
+        match guard.as_ref()?.icons.get(id) {
+            Some(IconEntry::Found(icon)) => Some(Some(icon.clone())),
+            Some(IconEntry::Missing { attempts, retry_at })
+                if *attempts >= ICON_ATTEMPTS || now < *retry_at =>
+            {
+                Some(None)
+            }
+            _ => None,
+        }
+    };
+    if let Some(icon) = cached(Instant::now()) {
+        return icon;
+    }
+
+    let _loading = ICON_LOADING.lock().unwrap_or_else(|e| e.into_inner());
+    // Mientras esperaba su turno, otro hilo pudo haberlo buscado ya.
+    if let Some(icon) = cached(Instant::now()) {
+        return icon;
+    }
+    let loaded = appicon::load(id).map(|p| AppIcon(Arc::new(p)));
+
+    let mut retry = None;
+    if let Some(w) = lock().as_mut() {
+        let entry = match &loaded {
+            Some(icon) => IconEntry::Found(icon.clone()),
+            None => {
+                let attempts = match w.icons.get(id) {
+                    Some(IconEntry::Missing { attempts, .. }) => attempts + 1,
+                    _ => 1,
+                };
+                let wait = ICON_RETRY * 2u32.pow(attempts - 1);
+                if attempts < ICON_ATTEMPTS {
+                    retry = Some(wait);
+                }
+                IconEntry::Missing {
+                    attempts,
+                    retry_at: Instant::now() + wait,
+                }
+            }
+        };
+        w.icons.insert(id.to_string(), entry);
+    }
+    // Con la música en pausa pueden no llegar eventos por un buen rato: el reintento se agenda.
+    if let Some(wait) = retry {
+        std::thread::spawn(move || {
+            std::thread::sleep(wait);
+            publish(false);
+        });
+    }
+    loaded
 }
 
 fn read(session: &Session, refresh_cover: bool, cached: Option<Cover>) -> Result<NowPlaying> {
