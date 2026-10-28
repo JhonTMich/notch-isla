@@ -13,7 +13,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, D2D1_ANTIALIAS_MODE_ALIASED,
+    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_ALIASED,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
@@ -43,6 +44,7 @@ struct Line {
     width: f32,
 }
 
+/// Formatos, layouts y pincel reutilizables; se invalidan los textos al cambiar el DPI.
 pub struct TextRenderer {
     dwrite: IDWriteFactory,
     target: ID2D1DCRenderTarget,
@@ -54,10 +56,15 @@ pub struct TextRenderer {
     lyric_faint: IDWriteTextFormat,
     title_line: Option<Line>,
     subtitle_line: Option<Line>,
+    // Una entrada por etiqueta: memoria acotada aunque cambien canción y tiempos.
+    time_lines: [Option<Line>; 2],
+    lyric_lines: [Option<Line>; 5],
+    brush: ID2D1SolidColorBrush,
     scale: f32,
 }
 
 impl TextRenderer {
+    /// Crea los formatos y un pincel compartido para todos los textos de la isla.
     pub fn new(scale: f32) -> Result<Self> {
         unsafe {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -67,14 +74,20 @@ impl TextRenderer {
                     format: DXGI_FORMAT_B8G8R8A8_UNORM,
                     alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
                 },
+                // 96 = trabajamos en píxeles físicos; el escalado lo aplicamos nosotros.
                 dpiX: 96.0,
                 dpiY: 96.0,
                 usage: D2D1_RENDER_TARGET_USAGE_NONE,
                 minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
             };
             let target = factory.CreateDCRenderTarget(&props)?;
+            // ClearType necesita fondo opaco conocido; la escala de grises sirve sobre la isla.
             target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
+            let brush = target.CreateSolidColorBrush(
+                &D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                None,
+            )?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let title = make_format(&dwrite, DWRITE_FONT_WEIGHT_SEMI_BOLD, 14.5 * scale)?;
             let subtitle = make_format(&dwrite, DWRITE_FONT_WEIGHT_REGULAR, 12.0 * scale)?;
@@ -94,6 +107,9 @@ impl TextRenderer {
                 lyric_current,
                 lyric_secondary,
                 lyric_faint,
+                brush,
+                time_lines: [None, None],
+                lyric_lines: [None, None, None, None, None],
                 title_line: None,
                 subtitle_line: None,
                 scale,
@@ -122,11 +138,14 @@ impl TextRenderer {
             self.lyric_faint = lyric_faint;
             self.title_line = None;
             self.subtitle_line = None;
+            self.time_lines = [None, None];
+            self.lyric_lines = [None, None, None, None, None];
             self.scale = scale;
         }
     }
 
     /// Ancho (píxeles físicos) de la más larga de las dos líneas, como las dibujaría `draw`.
+    /// Las maqueta y las guarda: `draw` las reutiliza sin volver a maquetar.
     pub fn measure(&mut self, title: &str, subtitle: &str) -> f32 {
         let t = line_for(&self.dwrite, &self.title, &mut self.title_line, title)
             .map_or(0.0, |l| l.width);
@@ -141,6 +160,8 @@ impl TextRenderer {
     }
 
     /// Dibuja textos encima de lo que ya hay en el DIB seleccionado en `dc`.
+    /// `t` = segundos desde que empezó el desplazamiento. Devuelve `true` si alguna línea
+    /// no cabe y por tanto se está desplazando (hay que seguir redibujando).
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -178,6 +199,7 @@ impl TextRenderer {
             if let Some(line) = title_line {
                 scrolling |= draw_line(
                     &self.target,
+                    &self.brush,
                     line,
                     &areas.text,
                     areas.text.cy - 19.0 * s,
@@ -190,6 +212,7 @@ impl TextRenderer {
             if let Some(line) = subtitle_line {
                 scrolling |= draw_line(
                     &self.target,
+                    &self.brush,
                     line,
                     &areas.text,
                     areas.text.cy + 1.0 * s,
@@ -206,6 +229,8 @@ impl TextRenderer {
                     &self.target,
                     &self.dwrite,
                     &self.time,
+                    &self.brush,
+                    &mut self.time_lines[0],
                     &time.current,
                     time.cur_x,
                     time.y,
@@ -217,6 +242,8 @@ impl TextRenderer {
                     &self.target,
                     &self.dwrite,
                     &self.time,
+                    &self.brush,
+                    &mut self.time_lines[1],
                     &time.remaining,
                     time.rem_x,
                     time.y,
@@ -247,6 +274,8 @@ impl TextRenderer {
                             &self.target,
                             &self.dwrite,
                             &self.lyric_secondary,
+                            &self.brush,
+                            &mut self.lyric_lines[0],
                             status,
                             lx,
                             cy - 10.0 * s,
@@ -260,6 +289,8 @@ impl TextRenderer {
                                 &self.target,
                                 &self.dwrite,
                                 &self.lyric_secondary,
+                                &self.brush,
+                                &mut self.lyric_lines[1],
                                 prev,
                                 lx,
                                 cy - 44.0 * s,
@@ -273,12 +304,14 @@ impl TextRenderer {
                                 &self.target,
                                 &self.dwrite,
                                 &self.lyric_current,
+                                &self.brush,
+                                &mut self.lyric_lines[2],
                                 curr,
                                 lx,
                                 cy - 20.0 * s,
                                 lw,
                                 44.0 * s,
-                                (1.0, 1.0, 1.0, a * 1.0),
+                                (1.0, 1.0, 1.0, a),
                             );
                         }
                         if let Some(next) = &lyrics.next {
@@ -286,6 +319,8 @@ impl TextRenderer {
                                 &self.target,
                                 &self.dwrite,
                                 &self.lyric_secondary,
+                                &self.brush,
+                                &mut self.lyric_lines[3],
                                 next,
                                 lx,
                                 cy + 24.0 * s,
@@ -299,6 +334,8 @@ impl TextRenderer {
                                 &self.target,
                                 &self.dwrite,
                                 &self.lyric_faint,
+                                &self.brush,
+                                &mut self.lyric_lines[4],
                                 next2,
                                 lx,
                                 cy + 45.0 * s,
@@ -319,11 +356,15 @@ impl TextRenderer {
     }
 }
 
-/// Dibuja un texto simple en (x, y) acotado por (w, h).
+/// Dibuja una etiqueta reutilizando su layout y el pincel del renderer.
+/// El texto se maqueta al cambiar; los límites se actualizan sin crear objetos COM.
+#[allow(clippy::too_many_arguments)]
 fn draw_simple_text(
     target: &ID2D1DCRenderTarget,
     dwrite: &IDWriteFactory,
     format: &IDWriteTextFormat,
+    brush: &ID2D1SolidColorBrush,
+    cache: &mut Option<Line>,
     text: &str,
     x: f32,
     y: f32,
@@ -334,22 +375,23 @@ fn draw_simple_text(
     if text.is_empty() || a <= 0.0 {
         return;
     }
-    unsafe {
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        if let Ok(layout) = dwrite.CreateTextLayout(&wide, format, w, h) {
-            let color = D2D1_COLOR_F { r, g, b, a };
-            if let Ok(brush) = target.CreateSolidColorBrush(&color, None) {
-                target.DrawTextLayout(
-                    Vector2 { X: x, Y: y },
-                    &layout,
-                    &brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
+    if let Some(line) = line_for(dwrite, format, cache, text) {
+        unsafe {
+            if line.layout.GetMaxWidth() != w {
+                let _ = line.layout.SetMaxWidth(w);
             }
+            if line.layout.GetMaxHeight() != h {
+                let _ = line.layout.SetMaxHeight(h);
+            }
+            brush.SetColor(&D2D1_COLOR_F { r, g, b, a });
+            target.DrawTextLayout(
+                Vector2 { X: x, Y: y }, &line.layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
         }
     }
 }
 
+/// Devuelve la línea maquetada de `text`, creándola solo si el texto cambió.
 fn line_for<'a>(
     dwrite: &IDWriteFactory,
     format: &IDWriteTextFormat,
@@ -376,8 +418,11 @@ fn line_for<'a>(
     cache.as_ref()
 }
 
+/// Dibuja una línea recortada a su columna. Devuelve `true` si se está desplazando.
+#[allow(clippy::too_many_arguments)]
 fn draw_line(
     target: &ID2D1DCRenderTarget,
+    brush: &ID2D1SolidColorBrush,
     line: &Line,
     area: &TextArea,
     y: f32,
@@ -405,23 +450,23 @@ fn draw_line(
         bottom: y + h,
     };
     unsafe {
-        if let Ok(brush) = target.CreateSolidColorBrush(&color, None) {
-            target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
-            target.DrawTextLayout(
-                Vector2 {
-                    X: area.x - offset,
-                    Y: y,
-                },
-                &line.layout,
-                &brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-            target.PopAxisAlignedClip();
-        }
+        brush.SetColor(&color);
+        target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        target.DrawTextLayout(
+            Vector2 {
+                X: area.x - offset,
+                Y: y,
+            },
+            &line.layout,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+        );
+        target.PopAxisAlignedClip();
     }
     overflow > 0.0
 }
 
+/// Ida y vuelta: pausa, avanza `overflow` píxeles, pausa, regresa. Se repite.
 fn scroll_offset(overflow: f32, speed: f32, t: f32) -> f32 {
     let travel = overflow / speed;
     let cycle = 2.0 * (SCROLL_PAUSE + travel);
@@ -437,6 +482,7 @@ fn scroll_offset(overflow: f32, speed: f32, t: f32) -> f32 {
     }
 }
 
+/// Formato de una línea: sin saltos (el desplazamiento muestra lo que no cabe).
 pub(crate) fn make_format(
     dwrite: &IDWriteFactory,
     weight: DWRITE_FONT_WEIGHT,
@@ -445,6 +491,7 @@ pub(crate) fn make_format(
     make_format_wrapped(dwrite, weight, size, false)
 }
 
+/// Formato con ajuste de línea opcional: el verso actual puede ocupar dos renglones.
 pub(crate) fn make_format_wrapped(
     dwrite: &IDWriteFactory,
     weight: DWRITE_FONT_WEIGHT,
@@ -452,6 +499,7 @@ pub(crate) fn make_format_wrapped(
     wrap: bool,
 ) -> Result<IDWriteTextFormat> {
     unsafe {
+        // Si a Segoe UI le falta un carácter, DirectWrite elige otra fuente automáticamente.
         let format = dwrite.CreateTextFormat(
             w!("Segoe UI"),
             None,

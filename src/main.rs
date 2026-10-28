@@ -1184,12 +1184,10 @@ impl App {
                 } else {
                     (None, None, None, None, None)
                 }
+            } else if self.settings.lyrics {
+                (None, None, None, None, Some("Sin letra sincronizada".to_string()))
             } else {
-                if self.settings.lyrics {
-                    (None, None, None, None, Some("Sin letra sincronizada".to_string()))
-                } else {
-                    (None, None, None, None, None)
-                }
+                (None, None, None, None, None)
             };
             island::LyricsInfo {
                 prev,
@@ -1248,16 +1246,20 @@ impl App {
                     .map(|next| (((next - secs) * 1000.0) as u32).clamp(FRAME_MS, 5000));
                 lyrics::line_at(lines, secs)
             })
-        } else {
-            if playing && self.settings.lyrics {
-                if let Some(m) = &self.media {
-                    if let (Some(lines), Some(t)) = (self.lyrics.get(&lyrics::key(&m.title, &m.artist)), m.timeline) {
-                        let secs = t.current_position(true);
-                        lyric_ms = lyrics::next_start(lines, secs)
-                            .map(|next| (((next - secs) * 1000.0) as u32).clamp(FRAME_MS, 5000));
-                    }
+        } else if playing && self.settings.lyrics {
+            if let Some(m) = &self.media {
+                if let (Some(lines), Some(t)) = (
+                    self.lyrics.get(&lyrics::key(&m.title, &m.artist)),
+                    m.timeline,
+                ) {
+                    let secs = t.current_position(true);
+                    // Despierta al comenzar el próximo verso, también con la letra dentro de la isla.
+                    lyric_ms = lyrics::next_start(lines, secs)
+                        .map(|next| (((next - secs) * 1000.0) as u32).clamp(FRAME_MS, 5000));
                 }
             }
+            None
+        } else {
             None
         };
         let mut projecting = false;
