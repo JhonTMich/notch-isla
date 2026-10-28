@@ -49,7 +49,7 @@ impl Settings {
             monitor: read_string(w!("Monitor")).unwrap_or_default(),
             hide_fullscreen: read_dword(w!("HideFullscreen")).is_none_or(|v| v != 0),
             notices: read_dword(w!("Notices")).is_none_or(|v| v != 0),
-            lyrics: read_dword(w!("Lyrics")).is_some_and(|v| v != 0),
+            lyrics: read_dword(w!("Lyrics")).is_none_or(|v| v != 0),
             real_bars: read_dword(w!("RealBars")).is_none_or(|v| v != 0),
             hotkey,
         }
