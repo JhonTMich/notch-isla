@@ -86,6 +86,12 @@ const CAPTURE_MS: u32 = 10_000;
 const COLLAPSE_TIMER: usize = 7;
 const COLLAPSE_DELAY_MS: u32 = 800;
 
+/// Resorte de la expansión (rigidez, amortiguación): rápido, con un pequeño rebote.
+const EXPAND_SPRING: (f32, f32) = (260.0, 22.0);
+/// Resorte al encogerse: más lento y con la amortiguación justa para no rebotar
+/// (2 * raíz de 110 = 21), así la isla se cierra suave y se asienta sin sacudirse.
+const COLLAPSE_SPRING: (f32, f32) = (110.0, 21.0);
+
 /// Cuánto dura cada aviso.
 const NOTICE_MS: u32 = 2500;
 const NOTICE_TIMER_DONE_MS: u32 = 8000;
@@ -325,7 +331,7 @@ impl App {
             surface,
             pos,
             scale,
-            spring: Spring::new(0.0, 260.0, 22.0),
+            spring: Spring::new(0.0, EXPAND_SPRING.0, EXPAND_SPRING.1),
             hovered: false,
             timer_ms: None,
             last_tick: Instant::now(),
@@ -619,6 +625,18 @@ impl App {
     /// Expandida mientras el mouse está encima o hay un aviso.
     fn update_expansion(&mut self) {
         let expand = self.visible && (self.hovered || self.lingering || self.notice.is_some());
+        self.aim_expansion(expand);
+    }
+
+    /// Lleva la isla a expandida o contraída, cada una con su movimiento: al expandirse, rápido
+    /// y con un pequeño rebote; al encogerse, más lento y sin rebote, frenando suave al final.
+    fn aim_expansion(&mut self, expand: bool) {
+        let (stiffness, damping) = if expand {
+            EXPAND_SPRING
+        } else {
+            COLLAPSE_SPRING
+        };
+        self.spring.retune(stiffness, damping);
         self.spring.set_target(if expand { 1.0 } else { 0.0 });
         self.start_animation();
     }
@@ -917,7 +935,7 @@ impl App {
             self.seek_hovered = false;
             self.cover_hovered = false;
             self.update_hovered = false;
-            self.spring.set_target(0.0);
+            self.aim_expansion(false);
         }
         self.start_animation();
     }

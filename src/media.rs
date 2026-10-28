@@ -4,6 +4,7 @@
 //! así que cada cambio se envía a la ventana con `PostMessageW(WM_MEDIA)`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -137,8 +138,9 @@ struct Watcher {
     selected: Option<SessionKey>,
     /// (posición de la sesión mostrada, cantidad de sesiones).
     sessions: (usize, usize),
-    /// Última carátula, para no decodificarla de nuevo en cada play/pausa.
-    cover: Option<Cover>,
+    /// Última carátula y la canción a la que pertenece (`song_key`): no se decodifica de nuevo
+    /// en cada play/pausa, y si un evento llega sin carátula para esa misma canción se conserva.
+    cover: Option<(String, Cover)>,
     /// Canción (título y artista) cuya carátula no se pudo leer, y cuántas veces se intentó.
     cover_retry: Option<(String, u32)>,
     /// Íconos ya buscados, por id de app (también los que no se encontraron).
@@ -162,9 +164,15 @@ const ICON_RETRY: Duration = Duration::from_secs(5);
 /// sin esto cada uno buscaría el mismo ícono en paralelo.
 static ICON_LOADING: Mutex<()> = Mutex::new(());
 
-/// Reintentos de carátula para una misma canción: a los 0,5 s, 1 s y 2 s.
-const COVER_ATTEMPTS: u32 = 3;
+/// Reintentos de carátula para una misma canción: a los 0,5 s, 1 s, 2 s, 4 s, 8 s y 16 s.
+/// Después de un anuncio, Spotify puede tardar varios segundos en tenerla lista.
+const COVER_ATTEMPTS: u32 = 6;
 const COVER_RETRY: Duration = Duration::from_millis(500);
+
+/// Lecturas fallidas seguidas de la sesión (Windows no respondió). Se reintenta unas pocas
+/// veces en lugar de dar la música por terminada.
+static READ_FAILURES: AtomicU32 = AtomicU32::new(0);
+const READ_ATTEMPTS: u32 = 5;
 
 /// `publish` corre de a uno (ver allí).
 static PUBLISHING: Mutex<()> = Mutex::new(());
@@ -378,16 +386,38 @@ fn publish(refresh_cover: bool) {
             w.session_key.as_ref().map(|key| key.0.clone()),
         )
     };
-    let mut info = session.and_then(|s| read(&s, refresh_cover, cached).ok());
+    let has_session = session.is_some();
+    let mut info = match session.map(|s| read(&s, refresh_cover, cached)) {
+        Some(Ok(info)) => {
+            READ_FAILURES.store(0, Ordering::Relaxed);
+            Some(info)
+        }
+        // Windows no respondió esta vez, pero la sesión sigue: no se borra nada (ni la
+        // carátula ni la música); se vuelve a leer en un momento.
+        Some(Err(_)) => {
+            if READ_FAILURES.fetch_add(1, Ordering::Relaxed) < READ_ATTEMPTS {
+                std::thread::spawn(|| {
+                    std::thread::sleep(COVER_RETRY);
+                    publish(true);
+                });
+                return;
+            }
+            None
+        }
+        None => None,
+    };
     let mut retry = None;
-    if refresh_cover || info.is_none() {
-        if let Some(w) = lock().as_mut() {
-            w.cover = info.as_ref().and_then(|i| i.cover.clone());
-            // Canción sin carátula: puede que la app aún no la tenga lista (pasa con Spotify
-            // al cambiar de canción o después de un anuncio). Se reintenta unas veces.
-            w.cover_retry = match info.as_ref().filter(|i| i.cover.is_none()) {
-                Some(i) => {
-                    let song = format!("{}\u{1}{}", i.title, i.artist);
+    if let Some(w) = lock().as_mut() {
+        match info.as_ref() {
+            Some(i) => {
+                let song = song_key(i);
+                if let Some(cover) = &i.cover {
+                    w.cover = Some((song, cover.clone()));
+                    w.cover_retry = None;
+                } else {
+                    // Canción sin carátula: puede que la app aún no la tenga lista (pasa con
+                    // Spotify al cambiar de canción o después de un anuncio). Se reintenta.
+                    w.cover = None;
                     let attempts = match w.cover_retry.take() {
                         Some((same, n)) if same == song => n + 1,
                         _ => 1,
@@ -395,10 +425,15 @@ fn publish(refresh_cover: bool) {
                     if attempts <= COVER_ATTEMPTS {
                         retry = Some(COVER_RETRY * 2u32.pow(attempts - 1));
                     }
-                    Some((song, attempts))
+                    w.cover_retry = Some((song, attempts));
                 }
-                None => None,
-            };
+            }
+            // Sin sesión: ya no hay música.
+            None if !has_session => {
+                w.cover = None;
+                w.cover_retry = None;
+            }
+            None => {}
         }
     }
     if let Some(wait) = retry {
@@ -474,18 +509,36 @@ fn app_icon(id: &str) -> Option<AppIcon> {
     loaded
 }
 
-fn read(session: &Session, refresh_cover: bool, cached: Option<Cover>) -> Result<NowPlaying> {
+/// Identifica una canción por título y artista, para saber de cuál es la carátula guardada.
+fn song_key(info: &NowPlaying) -> String {
+    format!("{}\u{1}{}", info.title, info.artist)
+}
+
+/// `cached` = la carátula guardada y su canción. Se decodifica de nuevo si se pide
+/// (`refresh_cover`) o si la canción ya no es la de la guardada; si esa lectura no trae
+/// carátula pero la canción es la misma, se conserva la guardada.
+fn read(
+    session: &Session,
+    refresh_cover: bool,
+    cached: Option<(String, Cover)>,
+) -> Result<NowPlaying> {
     let props = session.TryGetMediaPropertiesAsync()?.join()?;
     let playing = session.GetPlaybackInfo()?.PlaybackStatus()? == Status::Playing;
+    let title = props.Title()?.to_string_lossy();
+    let artist = props.Artist()?.to_string_lossy();
+    let song = format!("{title}\u{1}{artist}");
+    let same_song = cached
+        .as_ref()
+        .filter(|(cached_song, _)| *cached_song == song)
+        .map(|(_, cover)| cover.clone());
     // Sin carátula (o si no se pudo decodificar) la isla muestra el marcador gris.
-    let cover = if refresh_cover {
-        read_cover(&props).ok()
-    } else {
-        cached
+    let cover = match same_song {
+        Some(cover) if !refresh_cover => Some(cover),
+        kept => read_cover(&props).ok().or(kept),
     };
     Ok(NowPlaying {
-        title: props.Title()?.to_string_lossy(),
-        artist: props.Artist()?.to_string_lossy(),
+        title,
+        artist,
         album: props.AlbumTitle()?.to_string_lossy(),
         playing,
         cover,
@@ -589,4 +642,39 @@ fn post(hwnd: isize, info: Option<NowPlaying>) {
 /// `lparam` debe venir de un mensaje `WM_MEDIA` y usarse una sola vez.
 pub unsafe fn take(lparam: LPARAM) -> Option<NowPlaying> {
     *Box::from_raw(lparam.0 as *mut Option<NowPlaying>)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Diagnóstico (ignorado por defecto): lee 30 veces seguidas la carátula de lo que suena
+    /// y cuenta cuántas lecturas fallan sin que cambie la canción.
+    #[test]
+    #[ignore]
+    fn lecturas_de_caratula() {
+        let manager = Manager::RequestAsync().unwrap().join().unwrap();
+        let session = manager.GetCurrentSession().expect("no hay música sonando");
+        println!("app: {}", app_id(&session));
+        let (mut ok, mut sin_props, mut sin_caratula) = (0, 0, 0);
+        for _ in 0..30 {
+            match session
+                .TryGetMediaPropertiesAsync()
+                .and_then(|op| op.join())
+            {
+                Err(_) => sin_props += 1,
+                Ok(props) => match read_cover(&props) {
+                    Ok(_) => ok += 1,
+                    Err(e) => {
+                        sin_caratula += 1;
+                        println!("sin carátula: {e}");
+                    }
+                },
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        println!(
+            "bien: {ok}, fallo al leer la canción: {sin_props}, fallo de carátula: {sin_caratula}"
+        );
+    }
 }

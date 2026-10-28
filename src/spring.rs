@@ -24,6 +24,12 @@ impl Spring {
         self.target = target;
     }
 
+    /// Cambia rapidez y rebote sin cortar el movimiento (sigue desde donde va).
+    pub fn retune(&mut self, stiffness: f32, damping: f32) {
+        self.stiffness = stiffness;
+        self.damping = damping;
+    }
+
     /// Salta a `value` sin animación y queda quieto ahí.
     pub fn reset(&mut self, value: f32) {
         self.value = value;
@@ -49,5 +55,26 @@ impl Spring {
             self.velocity = 0.0;
         }
         !settled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Spring;
+
+    /// Con el resorte de encoger (el de `main.rs`), la isla baja de 1 a 0 sin pasarse de largo
+    /// y en menos de un segundo.
+    #[test]
+    fn encoge_sin_rebote() {
+        let mut s = Spring::new(1.0, 110.0, 21.0);
+        s.set_target(0.0);
+        let (mut t, mut lowest) = (0.0, 1.0f32);
+        while s.step(1.0 / 60.0) {
+            lowest = lowest.min(s.value);
+            t += 1.0 / 60.0;
+            assert!(t < 1.5, "no se asienta");
+        }
+        assert!(lowest > -0.01, "rebota: llega a {lowest}");
+        println!("se asienta en {t:.2} s");
     }
 }
